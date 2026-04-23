@@ -1,0 +1,7 @@
+bin/
+obj/
+sessions/
+*.user
+.vs/
+.vscode/
+.idea/
