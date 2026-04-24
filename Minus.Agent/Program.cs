@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using Minus;
 using Minus.Core;
@@ -35,7 +34,6 @@ var transcriptPath = Path.Combine("sessions", $"{filenameStamp}.jsonl");
 using var transcript = new TranscriptWriter(transcriptPath);
 
 var cwd = Directory.GetCurrentDirectory();
-var (gitCommit, gitBranch) = ReadGitMeta(cwd);
 var minusVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString();
 
 ITool[] tools = [new ReadFileTool(), new ListDirectoryTool()];
@@ -45,8 +43,6 @@ var agent = new Agent(systemPrompt, client, transcript, tools);
 transcript.Log(new Events.Meta(
     SessionId: sessionId,
     Cwd: cwd,
-    GitCommit: gitCommit,
-    GitBranch: gitBranch,
     Model: model,
     Endpoint: endpoint,
     MinusVersion: minusVersion,
@@ -85,32 +81,3 @@ while (true)
 
 transcript.Log(new Events.End());
 return 0;
-
-static (string? commit, string? branch) ReadGitMeta(string cwd)
-{
-    return (Run("rev-parse HEAD"), Run("rev-parse --abbrev-ref HEAD"));
-
-    string? Run(string gitArgs)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo("git", gitArgs)
-            {
-                WorkingDirectory = cwd,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            using var p = Process.Start(psi);
-            if (p is null) return null;
-            var output = p.StandardOutput.ReadToEnd().Trim();
-            p.WaitForExit(1000);
-            return p.ExitCode == 0 && !string.IsNullOrEmpty(output) ? output : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-}

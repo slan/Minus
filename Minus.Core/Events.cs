@@ -33,8 +33,6 @@ public abstract record SessionEvent
 public sealed record Meta(
     string SessionId,
     string Cwd,
-    string? GitCommit,
-    string? GitBranch,
     string Model,
     string Endpoint,
     string? MinusVersion,
