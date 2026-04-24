@@ -1,6 +1,9 @@
+using System.Diagnostics;
+using System.Reflection;
 using Minus;
 using Minus.Core;
 using Minus.Tools;
+using Events = Minus.Core.Events;
 
 // 127.0.0.1 (not `localhost`) avoids a ~21s IPv6-fallback stall on Windows
 // when the llama.cpp container's port forwarder only binds IPv4.
@@ -26,14 +29,30 @@ if (!File.Exists(personaPath))
 }
 var systemPrompt = await File.ReadAllTextAsync(personaPath);
 
-var sessionId = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
-var transcriptPath = Path.Combine("sessions", $"{sessionId}.jsonl");
+var sessionId = Guid.CreateVersion7().ToString("N");
+var filenameStamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
+var transcriptPath = Path.Combine("sessions", $"{filenameStamp}.jsonl");
 using var transcript = new TranscriptWriter(transcriptPath);
-transcript.Log("session_start", new { persona = personaName, endpoint, model });
 
-var client = new LlamaClient(endpoint, model, transcript);
+var cwd = Directory.GetCurrentDirectory();
+var (gitCommit, gitBranch) = ReadGitMeta(cwd);
+var minusVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString();
+
 ITool[] tools = [new ReadFileTool(), new ListDirectoryTool()];
+var client = new LlamaClient(endpoint, model, transcript);
 var agent = new Agent(systemPrompt, client, transcript, tools);
+
+transcript.Log(new Events.Meta(
+    SessionId: sessionId,
+    Cwd: cwd,
+    GitCommit: gitCommit,
+    GitBranch: gitBranch,
+    Model: model,
+    Endpoint: endpoint,
+    MinusVersion: minusVersion,
+    Persona: personaName,
+    Tools: agent.ToolNames.ToList()
+));
 
 Console.WriteLine($"Minus — persona: {personaName} — endpoint: {endpoint} — transcript: {transcriptPath}");
 Console.WriteLine("Type your message. 'exit' or Ctrl+D to quit.\n");
@@ -53,10 +72,45 @@ while (true)
     }
     catch (Exception ex)
     {
-        transcript.Log("error", new { message = ex.Message });
+        transcript.Log(new Events.Error(
+            Phase: "agent",
+            HttpStatus: null,
+            Code: null,
+            Message: ex.Message,
+            Retryable: false
+        ));
         Console.WriteLine($"\n[error] {ex.Message}\n");
     }
 }
 
-transcript.Log("session_end");
+transcript.Log(new Events.End());
 return 0;
+
+static (string? commit, string? branch) ReadGitMeta(string cwd)
+{
+    return (Run("rev-parse HEAD"), Run("rev-parse --abbrev-ref HEAD"));
+
+    string? Run(string gitArgs)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("git", gitArgs)
+            {
+                WorkingDirectory = cwd,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi);
+            if (p is null) return null;
+            var output = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit(1000);
+            return p.ExitCode == 0 && !string.IsNullOrEmpty(output) ? output : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}

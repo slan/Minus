@@ -29,6 +29,20 @@ public record ToolDefinition(string Type, FunctionDefinition Function);
 
 public record FunctionDefinition(string Name, string Description, JsonElement Parameters);
 
-public record ChatResponse(List<Choice> Choices);
+public record ChatResponse(
+    List<Choice> Choices,
+    string? Id = null,
+    Usage? Usage = null,
+    ServerTimings? Timings = null
+);
 
 public record Choice(Message Message, string? FinishReason);
+
+public record Usage(int PromptTokens, int CompletionTokens, int TotalTokens);
+
+public record ServerTimings(
+    double? PromptMs = null,
+    double? PromptPerSecond = null,
+    double? PredictedMs = null,
+    double? PredictedPerSecond = null
+);

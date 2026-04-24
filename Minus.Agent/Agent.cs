@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Minus.Core;
+using Events = Minus.Core.Events;
 
 namespace Minus;
 
@@ -28,14 +30,18 @@ public sealed class Agent
         _history.Add(new Message("system", SystemPrompt));
     }
 
+    public IReadOnlyCollection<string> ToolNames => _tools.Keys;
+
     public async Task<string> RunAsync(string userInput, CancellationToken ct)
     {
-        _transcript.Log("user_input", new { content = userInput });
+        var turnId = Guid.CreateVersion7().ToString("N");
+
+        _transcript.Log(new Events.UserInput(userInput) { TurnId = turnId });
         _history.Add(new Message("user", userInput));
 
         for (int i = 0; i < MaxIterations; i++)
         {
-            var assistant = await _client.ChatAsync(_history, _toolDefs, ct);
+            var assistant = await _client.ChatAsync(_history, _toolDefs, turnId, ct);
             _history.Add(assistant);
 
             if (assistant.ToolCalls is null || assistant.ToolCalls.Count == 0)
@@ -43,7 +49,7 @@ public sealed class Agent
 
             foreach (var call in assistant.ToolCalls)
             {
-                var result = await ExecuteToolAsync(call, ct);
+                var result = await ExecuteToolAsync(call, turnId, ct);
                 _history.Add(new Message(
                     "tool",
                     result,
@@ -55,35 +61,47 @@ public sealed class Agent
         return "[agent stopped: max iterations reached]";
     }
 
-    private async Task<string> ExecuteToolAsync(ToolCall call, CancellationToken ct)
+    private async Task<string> ExecuteToolAsync(ToolCall call, string turnId, CancellationToken ct)
     {
-        _transcript.Log("tool_call", new
+        _transcript.Log(new Events.ToolCall(call.Id, call.Function.Name, call.Function.Arguments)
         {
-            id = call.Id,
-            name = call.Function.Name,
-            arguments = call.Function.Arguments,
+            TurnId = turnId,
         });
+
+        var sw = Stopwatch.StartNew();
 
         if (!_tools.TryGetValue(call.Function.Name, out var tool))
         {
             var err = $"unknown tool: {call.Function.Name}";
-            _transcript.Log("tool_result", new { id = call.Id, error = err });
+            sw.Stop();
+            _transcript.Log(new Events.ToolResult(call.Id, null, err, sw.ElapsedMilliseconds)
+            {
+                TurnId = turnId,
+            });
             return err;
         }
 
         try
         {
-            var args = string.IsNullOrWhiteSpace(call.Function.Arguments)
+            var argsJson = string.IsNullOrWhiteSpace(call.Function.Arguments)
                 ? JsonDocument.Parse("{}").RootElement
                 : JsonDocument.Parse(call.Function.Arguments).RootElement;
-            var result = await tool.ExecuteAsync(args, ct);
-            _transcript.Log("tool_result", new { id = call.Id, content = result });
+            var result = await tool.ExecuteAsync(argsJson, ct);
+            sw.Stop();
+            _transcript.Log(new Events.ToolResult(call.Id, result, null, sw.ElapsedMilliseconds)
+            {
+                TurnId = turnId,
+            });
             return result;
         }
         catch (Exception ex)
         {
             var err = $"tool error: {ex.Message}";
-            _transcript.Log("tool_result", new { id = call.Id, error = err });
+            sw.Stop();
+            _transcript.Log(new Events.ToolResult(call.Id, null, err, sw.ElapsedMilliseconds)
+            {
+                TurnId = turnId,
+            });
             return err;
         }
     }

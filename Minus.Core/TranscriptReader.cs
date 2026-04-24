@@ -1,16 +1,15 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Minus.Core.Events;
 
 namespace Minus.Core;
 
-// Reads a JSONL transcript as a pull stream of LoggedEvent values. Pairs
-// with TranscriptWriter on the agent side. The payload is kept as a raw
-// JsonElement for now — a typed event hierarchy comes in a later step.
-public sealed record LoggedEvent(DateTimeOffset Ts, string Type, JsonElement? Data);
-
+// Reads a JSONL transcript as a pull stream of typed SessionEvent values.
+// Pairs with TranscriptWriter on the agent side: both round-trip the same
+// polymorphic SessionEvent contract (see Events.cs).
 public static class TranscriptReader
 {
-    public static async IAsyncEnumerable<LoggedEvent> ReadAsync(
+    public static async IAsyncEnumerable<SessionEvent> ReadAsync(
         string path,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -24,20 +23,9 @@ public static class TranscriptReader
             if (line is null) yield break;
             if (string.IsNullOrWhiteSpace(line)) continue;
 
-            yield return Parse(line);
+            var ev = JsonSerializer.Deserialize<SessionEvent>(line, Json.Options)
+                ?? throw new FormatException($"failed to parse transcript line: {line}");
+            yield return ev;
         }
-    }
-
-    private static LoggedEvent Parse(string line)
-    {
-        using var doc = JsonDocument.Parse(line);
-        var root = doc.RootElement;
-        var ts = root.GetProperty("ts").GetDateTimeOffset();
-        var type = root.GetProperty("type").GetString()
-            ?? throw new FormatException("transcript entry missing 'type'");
-        JsonElement? data = root.TryGetProperty("data", out var d) && d.ValueKind != JsonValueKind.Null
-            ? d.Clone()
-            : null;
-        return new LoggedEvent(ts, type, data);
     }
 }

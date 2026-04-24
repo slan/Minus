@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Minus.Core.Events;
 
 namespace Minus.Core;
 
@@ -14,15 +15,11 @@ public sealed class TranscriptWriter : IDisposable
         _writer = new StreamWriter(path, append: true) { AutoFlush = true };
     }
 
-    public void Log(string type, object? data = null)
+    public void Log(SessionEvent ev)
     {
-        var entry = new
-        {
-            ts = DateTimeOffset.UtcNow.ToString("o"),
-            type,
-            data,
-        };
-        _writer.WriteLine(JsonSerializer.Serialize(entry, Json.Options));
+        // Serialize as the abstract base so polymorphic type-discriminator
+        // emission ("type": "...") kicks in.
+        _writer.WriteLine(JsonSerializer.Serialize<SessionEvent>(ev, Json.Options));
     }
 
     public void Dispose() => _writer.Dispose();
