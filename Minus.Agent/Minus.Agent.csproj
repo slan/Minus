@@ -15,4 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Minus.Core\Minus.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" Version="0.55.2" />
+  </ItemGroup>
 </Project>

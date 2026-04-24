@@ -2,6 +2,7 @@ using System.Reflection;
 using Minus;
 using Minus.Core;
 using Minus.Tools;
+using Spectre.Console;
 using Events = Minus.Core.Events;
 
 // 127.0.0.1 (not `localhost`) avoids a ~21s IPv6-fallback stall on Windows
@@ -32,15 +33,17 @@ var sessionId = Guid.CreateVersion7().ToString("N");
 var filenameStamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
 var transcriptPath = Path.Combine("sessions", $"{filenameStamp}.jsonl");
 using var transcript = new TranscriptWriter(transcriptPath);
+var ui = new ConsoleUi();
+var sink = new AggregateEventSink(transcript, ui);
 
 var cwd = Directory.GetCurrentDirectory();
 var minusVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString();
 
 ITool[] tools = [new ReadFileTool(), new ListDirectoryTool()];
-var client = new LlamaClient(endpoint, model, transcript);
-var agent = new Agent(systemPrompt, client, transcript, tools);
+var client = new LlamaClient(endpoint, model, sink);
+var agent = new Agent(systemPrompt, client, sink, tools);
 
-transcript.Log(new Events.Meta(
+sink.Log(new Events.Meta(
     SessionId: sessionId,
     Cwd: cwd,
     Model: model,
@@ -50,12 +53,12 @@ transcript.Log(new Events.Meta(
     Tools: agent.ToolNames.ToList()
 ));
 
-Console.WriteLine($"Minus — persona: {personaName} — endpoint: {endpoint} — transcript: {transcriptPath}");
-Console.WriteLine("Type your message. 'exit' or Ctrl+D to quit.\n");
+AnsiConsole.MarkupLine($"[grey]transcript:[/] [dim]{Markup.Escape(transcriptPath)}[/]");
+AnsiConsole.MarkupLine("[grey]type 'exit' or Ctrl+D to quit[/]");
 
 while (true)
 {
-    Console.Write("> ");
+    AnsiConsole.Markup("\n[cyan]>[/] ");
     var input = Console.ReadLine();
     if (input is null) break;
     if (input.Trim() == "exit") break;
@@ -63,21 +66,19 @@ while (true)
 
     try
     {
-        var reply = await agent.RunAsync(input, CancellationToken.None);
-        Console.WriteLine($"\n{reply}\n");
+        await agent.RunAsync(input, CancellationToken.None);
     }
     catch (Exception ex)
     {
-        transcript.Log(new Events.Error(
+        sink.Log(new Events.Error(
             Phase: "agent",
             HttpStatus: null,
             Code: null,
             Message: ex.Message,
             Retryable: false
         ));
-        Console.WriteLine($"\n[error] {ex.Message}\n");
     }
 }
 
-transcript.Log(new Events.End());
+sink.Log(new Events.End());
 return 0;
