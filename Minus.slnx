@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Minus.Agent/Minus.Agent.csproj" />
+  <Project Path="Minus.Core/Minus.Core.csproj" />
+  <Project Path="Minus.Inspector/Minus.Inspector.csproj" />
+</Solution>

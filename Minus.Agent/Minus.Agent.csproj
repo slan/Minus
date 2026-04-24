@@ -5,10 +5,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Minus</RootNamespace>
+    <AssemblyName>minus</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="personas/*.md">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Minus.Core\Minus.Core.csproj" />
   </ItemGroup>
 </Project>
