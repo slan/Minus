@@ -1,13 +1,13 @@
 using System.Text.Json;
 
-namespace Minus;
+namespace Minus.Core;
 
-public sealed class Transcript : IDisposable
+public sealed class TranscriptWriter : IDisposable
 {
     private readonly StreamWriter _writer;
     public string Path { get; }
 
-    public Transcript(string path)
+    public TranscriptWriter(string path)
     {
         Path = path;
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);

@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Minus;
+namespace Minus.Core;
 
 // OpenAI-compatible chat completion shapes (llama.cpp server speaks this).
 // Serialized via Json.Options (snake_case, nulls omitted).

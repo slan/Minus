@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Minus;
+namespace Minus.Core;
 
 public static class Json
 {

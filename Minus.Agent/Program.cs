@@ -1,4 +1,5 @@
 using Minus;
+using Minus.Core;
 using Minus.Tools;
 
 // 127.0.0.1 (not `localhost`) avoids a ~21s IPv6-fallback stall on Windows
@@ -27,7 +28,7 @@ var systemPrompt = await File.ReadAllTextAsync(personaPath);
 
 var sessionId = DateTime.UtcNow.ToString("yyyy-MM-ddTHH-mm-ss");
 var transcriptPath = Path.Combine("sessions", $"{sessionId}.jsonl");
-using var transcript = new Transcript(transcriptPath);
+using var transcript = new TranscriptWriter(transcriptPath);
 transcript.Log("session_start", new { persona = personaName, endpoint, model });
 
 var client = new LlamaClient(endpoint, model, transcript);

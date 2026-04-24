@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using Minus.Core;
 
 namespace Minus;
 
@@ -7,9 +8,9 @@ public sealed class LlamaClient
 {
     private readonly HttpClient _http;
     private readonly string _model;
-    private readonly Transcript _transcript;
+    private readonly TranscriptWriter _transcript;
 
-    public LlamaClient(string endpoint, string model, Transcript transcript)
+    public LlamaClient(string endpoint, string model, TranscriptWriter transcript)
     {
         _http = new HttpClient
         {
