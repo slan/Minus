@@ -72,7 +72,14 @@ return 0;
 
 // ---------- theme ----------
 
-sealed record Theme(ColorScheme Base, ColorScheme Focus, ColorScheme Status, ColorScheme Title, ColorScheme Separator)
+sealed record Theme(
+    ColorScheme Base,
+    ColorScheme Focus,
+    ColorScheme Status,
+    ColorScheme Title,
+    ColorScheme Separator,
+    JsonPalette Json,
+    Terminal.Gui.Attribute DefaultText)
 {
     public static Theme Build()
     {
@@ -127,9 +134,29 @@ sealed record Theme(ColorScheme Base, ColorScheme Focus, ColorScheme Status, Col
             Disabled  = Attr(Color.DarkGray,    Color.Black),
         };
 
-        return new Theme(baseScheme, focusScheme, statusScheme, titleScheme, separatorScheme);
+        var jsonPalette = new JsonPalette(
+            Default:    Attr(Color.Gray,          Color.Black),
+            Key:        Attr(Color.BrightCyan,    Color.Black),
+            String:     Attr(Color.BrightGreen,   Color.Black),
+            Number:     Attr(Color.BrightMagenta, Color.Black),
+            Keyword:    Attr(Color.BrightYellow,  Color.Black),
+            Structural: Attr(Color.DarkGray,      Color.Black));
+
+        var defaultText = Attr(Color.Gray, Color.Black);
+
+        return new Theme(baseScheme, focusScheme, statusScheme, titleScheme, separatorScheme, jsonPalette, defaultText);
     }
 }
+
+readonly record struct JsonPalette(
+    Terminal.Gui.Attribute Default,
+    Terminal.Gui.Attribute Key,
+    Terminal.Gui.Attribute String,
+    Terminal.Gui.Attribute Number,
+    Terminal.Gui.Attribute Keyword,
+    Terminal.Gui.Attribute Structural);
+
+readonly record struct ColoredRun(string Text, Terminal.Gui.Attribute Attr);
 
 // ---------- timeline node hierarchy ----------
 
@@ -192,6 +219,272 @@ sealed class TurnGroup : TimelineNode
     private static string FormatK(int n) => n >= 1000 ? $"{n / 1000.0:0.#}k" : n.ToString();
 }
 
+// ---------- colored text view ----------
+
+// Minimal per-character-attribute text view. Terminal.Gui v1's TextView
+// applies a single attribute to the whole buffer; this view accepts
+// pre-colored runs so we can syntax-highlight JSON in the detail pane.
+// Read-only. Scrollable via arrow keys / PgUp / PgDn / Home / End.
+sealed class ColoredTextView : View
+{
+    private List<List<ColoredRun>> _logicalLines = new();
+    private List<List<ColoredRun>> _wrappedLines = new();
+    private bool _wordWrap;
+    private int _top;
+    private int _lastWrapWidth = -1;
+    private Terminal.Gui.Attribute _defaultAttr;
+
+    public ColoredTextView()
+    {
+        CanFocus = true;
+    }
+
+    public bool WordWrap
+    {
+        get => _wordWrap;
+        set
+        {
+            if (_wordWrap == value) return;
+            _wordWrap = value;
+            _lastWrapWidth = -1;
+            RebuildWrapped();
+            SetNeedsDisplay();
+        }
+    }
+
+    public void SetColoredLines(List<List<ColoredRun>> lines, Terminal.Gui.Attribute defaultAttr)
+    {
+        _logicalLines = lines;
+        _defaultAttr = defaultAttr;
+        _top = 0;
+        _lastWrapWidth = -1;
+        RebuildWrapped();
+        SetNeedsDisplay();
+    }
+
+    public void SetPlainText(string text, Terminal.Gui.Attribute attr)
+    {
+        var lines = text.Replace("\r\n", "\n").Split('\n')
+            .Select(line => line.Length == 0
+                ? new List<ColoredRun>()
+                : new List<ColoredRun> { new ColoredRun(line, attr) })
+            .ToList();
+        SetColoredLines(lines, attr);
+    }
+
+    private void RebuildWrapped()
+    {
+        int width = Math.Max(1, Bounds.Width);
+        _lastWrapWidth = width;
+
+        if (!_wordWrap)
+        {
+            _wrappedLines = new List<List<ColoredRun>>(_logicalLines);
+            return;
+        }
+
+        var result = new List<List<ColoredRun>>();
+        foreach (var logical in _logicalLines)
+        {
+            var current = new List<ColoredRun>();
+            int col = 0;
+            foreach (var run in logical)
+            {
+                int ri = 0;
+                while (ri < run.Text.Length)
+                {
+                    int take = Math.Min(width - col, run.Text.Length - ri);
+                    if (take <= 0)
+                    {
+                        result.Add(current);
+                        current = new List<ColoredRun>();
+                        col = 0;
+                        continue;
+                    }
+                    current.Add(new ColoredRun(run.Text.Substring(ri, take), run.Attr));
+                    col += take;
+                    ri += take;
+                    if (col >= width)
+                    {
+                        result.Add(current);
+                        current = new List<ColoredRun>();
+                        col = 0;
+                    }
+                }
+            }
+            result.Add(current);
+        }
+        _wrappedLines = result;
+    }
+
+    public override void LayoutSubviews()
+    {
+        base.LayoutSubviews();
+        if (Bounds.Width != _lastWrapWidth)
+        {
+            RebuildWrapped();
+            SetNeedsDisplay();
+        }
+    }
+
+    public override void Redraw(Rect bounds)
+    {
+        Driver.SetAttribute(_defaultAttr);
+        for (int y = 0; y < bounds.Height; y++)
+        {
+            Move(0, y);
+            for (int x = 0; x < bounds.Width; x++) Driver.AddRune(' ');
+        }
+
+        for (int y = 0; y < bounds.Height; y++)
+        {
+            int idx = _top + y;
+            if (idx < 0 || idx >= _wrappedLines.Count) break;
+
+            Move(0, y);
+            int col = 0;
+            foreach (var run in _wrappedLines[idx])
+            {
+                Driver.SetAttribute(run.Attr);
+                foreach (var ch in run.Text)
+                {
+                    if (col >= bounds.Width) break;
+                    Driver.AddRune(new System.Rune(ch));
+                    col++;
+                }
+                if (col >= bounds.Width) break;
+            }
+        }
+    }
+
+    public override bool ProcessKey(KeyEvent kb)
+    {
+        int pageSize = Math.Max(1, Bounds.Height - 1);
+        int maxTop = Math.Max(0, _wrappedLines.Count - pageSize);
+        int newTop = kb.Key switch
+        {
+            Key.CursorUp   => Math.Max(0, _top - 1),
+            Key.CursorDown => Math.Min(maxTop, _top + 1),
+            Key.PageUp     => Math.Max(0, _top - pageSize),
+            Key.PageDown   => Math.Min(maxTop, _top + pageSize),
+            Key.Home       => 0,
+            Key.End        => maxTop,
+            _              => _top - 1 == _top ? _top : _top, // no-op marker
+        };
+        // A cleaner switch would be needed; we just detect a real change.
+        if (kb.Key is Key.CursorUp or Key.CursorDown or Key.PageUp or Key.PageDown or Key.Home or Key.End)
+        {
+            if (newTop != _top) { _top = newTop; SetNeedsDisplay(); }
+            return true;
+        }
+        return false;
+    }
+}
+
+static class JsonColorizer
+{
+    public static List<List<ColoredRun>> Colorize(string json, JsonPalette p)
+    {
+        int n = json.Length;
+        var attrs = new Terminal.Gui.Attribute[n];
+
+        int i = 0;
+        while (i < n)
+        {
+            char c = json[i];
+            if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':')
+            {
+                attrs[i] = p.Structural;
+                i++;
+            }
+            else if (c == '"')
+            {
+                int start = i;
+                i++;
+                while (i < n && json[i] != '"')
+                {
+                    if (json[i] == '\\' && i + 1 < n) i += 2;
+                    else i++;
+                }
+                if (i < n) i++;
+                int j = i;
+                while (j < n && (json[j] == ' ' || json[j] == '\t')) j++;
+                var kind = (j < n && json[j] == ':') ? p.Key : p.String;
+                for (int k = start; k < i; k++) attrs[k] = kind;
+            }
+            else if (c == '-' || char.IsDigit(c))
+            {
+                int start = i;
+                i++;
+                while (i < n)
+                {
+                    char d = json[i];
+                    bool inside =
+                        char.IsDigit(d) || d == '.' ||
+                        d == 'e' || d == 'E' ||
+                        ((d == '+' || d == '-') && i > start && (json[i - 1] == 'e' || json[i - 1] == 'E'));
+                    if (!inside) break;
+                    i++;
+                }
+                for (int k = start; k < i; k++) attrs[k] = p.Number;
+            }
+            else if (char.IsLetter(c))
+            {
+                int start = i;
+                while (i < n && char.IsLetter(json[i])) i++;
+                var word = json.Substring(start, i - start);
+                var attr = (word == "true" || word == "false" || word == "null") ? p.Keyword : p.Default;
+                for (int k = start; k < i; k++) attrs[k] = attr;
+            }
+            else
+            {
+                attrs[i] = p.Default;
+                i++;
+            }
+        }
+
+        var lines = new List<List<ColoredRun>>();
+        var current = new List<ColoredRun>();
+        var sb = new StringBuilder();
+        int? runAttrValue = null;
+        Terminal.Gui.Attribute runAttr = p.Default;
+
+        void Flush()
+        {
+            if (sb.Length > 0)
+            {
+                current.Add(new ColoredRun(sb.ToString(), runAttr));
+                sb.Clear();
+            }
+        }
+
+        for (i = 0; i < n; i++)
+        {
+            char c = json[i];
+            if (c == '\r') continue;
+            if (c == '\n')
+            {
+                Flush();
+                lines.Add(current);
+                current = new List<ColoredRun>();
+                runAttrValue = null;
+                continue;
+            }
+            if (runAttrValue != attrs[i].Value)
+            {
+                Flush();
+                runAttr = attrs[i];
+                runAttrValue = attrs[i].Value;
+            }
+            sb.Append(c);
+        }
+        Flush();
+        if (current.Count > 0 || lines.Count == 0) lines.Add(current);
+
+        return lines;
+    }
+}
+
 // ---------- main view ----------
 
 sealed class InspectorView : View
@@ -203,7 +496,7 @@ sealed class InspectorView : View
     private readonly ListView _sessionList;
     private readonly TreeView<TimelineNode> _timeline;
     private readonly Label _detailHeader;
-    private readonly TextView _detail;
+    private readonly ColoredTextView _detail;
     private readonly string _sessionsDir;
     private readonly bool _follow;
     private readonly StatusItem _statusInfo;
@@ -298,12 +591,11 @@ sealed class InspectorView : View
             Width = Dim.Fill(1), Height = 1,
             ColorScheme = theme.Title,
         };
-        _detail = new TextView
+        _detail = new ColoredTextView
         {
             X = rightX, Y = Pos.Bottom(_detailHeader),
             Width = Dim.Fill(1),
             Height = Dim.Fill(),
-            ReadOnly = true,
             WordWrap = false,
             ColorScheme = theme.Base,
         };
@@ -404,7 +696,7 @@ sealed class InspectorView : View
             }
 
             RebuildTimeline(preserveSelection: false);
-            if (_timelineNodes.Count == 0) _detail.Text = "(empty session)";
+            if (_timelineNodes.Count == 0) _detail.SetPlainText("(empty session)", _theme.DefaultText);
 
             if (_follow)
             {
@@ -422,11 +714,12 @@ sealed class InspectorView : View
             _currentEvents = new List<Events.SessionEvent>();
             _timelineNodes = new List<TimelineNode>();
             _timeline.ClearObjects();
-            _detail.Text =
+            _detail.SetPlainText(
                 $"Could not parse {Path.GetFileName(path)}\n\n" +
                 $"{ex.GetType().Name}: {ex.Message}\n\n" +
                 $"This is expected for transcripts written before the typed-event\n" +
-                $"schema change. Delete the file or start a new session.";
+                $"schema change. Delete the file or start a new session.",
+                _theme.DefaultText);
         }
         finally
         {
@@ -506,18 +799,28 @@ sealed class InspectorView : View
 
     private void ShowDetailFor(TimelineNode? node)
     {
-        if (node is null) { _detail.Text = ""; return; }
+        if (node is null)
+        {
+            _detail.SetPlainText("", _theme.DefaultText);
+            return;
+        }
 
         if (node is TurnGroup tg)
         {
-            _detail.Text = _detailMode == DetailMode.Raw
+            var text = _detailMode == DetailMode.Raw
                 ? $"(turn grouping row — select a child event for raw JSON)\n\n{RenderTurnSummary(tg)}"
                 : RenderTurnSummary(tg);
+            _detail.SetPlainText(text, _theme.DefaultText);
             return;
         }
 
         if (node.BackingEvent is { } ev)
-            _detail.Text = _detailMode == DetailMode.Raw ? RenderRaw(ev) : RenderEvent(ev);
+        {
+            if (_detailMode == DetailMode.Raw)
+                _detail.SetColoredLines(JsonColorizer.Colorize(RenderRaw(ev), _theme.Json), _theme.Json.Default);
+            else
+                _detail.SetPlainText(RenderEvent(ev), _theme.DefaultText);
+        }
     }
 
     private void PollFollow()
