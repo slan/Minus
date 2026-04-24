@@ -1,5 +1,6 @@
 using System.Reflection;
 using Minus;
+using Minus.Commands;
 using Minus.Core;
 using Minus.Tools;
 using Spectre.Console;
@@ -43,6 +44,10 @@ ITool[] tools = [new ReadFileTool(), new ListDirectoryTool()];
 var client = new LlamaClient(endpoint, model, sink);
 var agent = new Agent(systemPrompt, client, sink, tools);
 
+ISlashCommand[] slashCommands = [new QuitCommand(), new HelpCommand()];
+var dispatcher = new SlashCommandDispatcher(slashCommands);
+var commandContext = new SlashCommandContext(dispatcher.Commands);
+
 sink.Log(new Events.Meta(
     SessionId: sessionId,
     Cwd: cwd,
@@ -54,15 +59,17 @@ sink.Log(new Events.Meta(
 ));
 
 AnsiConsole.MarkupLine($"[grey]transcript:[/] [dim]{Markup.Escape(transcriptPath)}[/]");
-AnsiConsole.MarkupLine("[grey]type 'exit' or Ctrl+D to quit[/]");
+AnsiConsole.MarkupLine("[grey]type /help for commands, /quit or Ctrl+D to exit[/]");
 
-while (true)
+while (!commandContext.ExitRequested)
 {
     AnsiConsole.Markup("\n[cyan]>[/] ");
     var input = Console.ReadLine();
     if (input is null) break;
-    if (input.Trim() == "exit") break;
     if (string.IsNullOrWhiteSpace(input)) continue;
+
+    if (await dispatcher.TryDispatchAsync(input, commandContext, CancellationToken.None))
+        continue;
 
     try
     {
