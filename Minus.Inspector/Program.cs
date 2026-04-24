@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Minus.Core;
 using Terminal.Gui;
+using Terminal.Gui.Graphs;
 using Terminal.Gui.Trees;
 using Events = Minus.Core.Events;
 
@@ -37,6 +38,9 @@ try
 {
     var top = Application.Top;
 
+    var theme = Theme.Build();
+    top.ColorScheme = theme.Base;
+
     var statusInfo = new StatusItem(Key.Null, "(no session)", null);
     var statusBar = new StatusBar(new[]
     {
@@ -44,11 +48,14 @@ try
         new StatusItem(Key.r, "~r Raw/Rendered", null),
         new StatusItem(Key.w, "~w Wrap", null),
         new StatusItem(Key.q, "~q Quit", null),
-    });
-
-    var inspector = new InspectorView(sessionsDir, follow, statusInfo, statusBar)
+    })
     {
-        Y = 0,
+        ColorScheme = theme.Status,
+    };
+
+    var inspector = new InspectorView(sessionsDir, follow, statusInfo, statusBar, theme)
+    {
+        X = 0, Y = 0,
         Width = Dim.Fill(),
         Height = Dim.Fill(1),
     };
@@ -62,6 +69,67 @@ finally
     Application.Shutdown();
 }
 return 0;
+
+// ---------- theme ----------
+
+sealed record Theme(ColorScheme Base, ColorScheme Focus, ColorScheme Status, ColorScheme Title, ColorScheme Separator)
+{
+    public static Theme Build()
+    {
+        Terminal.Gui.Attribute Attr(Color fg, Color bg) => Application.Driver.MakeAttribute(fg, bg);
+
+        var baseScheme = new ColorScheme
+        {
+            Normal    = Attr(Color.Gray,        Color.Black),
+            Focus     = Attr(Color.White,       Color.Black),
+            HotNormal = Attr(Color.BrightCyan,  Color.Black),
+            HotFocus  = Attr(Color.BrightCyan,  Color.Black),
+            Disabled  = Attr(Color.DarkGray,    Color.Black),
+        };
+
+        // Focused list/tree row: subtle dark highlight behind text.
+        var focusScheme = new ColorScheme
+        {
+            Normal    = Attr(Color.Gray,        Color.Black),
+            Focus     = Attr(Color.BrightYellow,Color.DarkGray),
+            HotNormal = Attr(Color.BrightCyan,  Color.Black),
+            HotFocus  = Attr(Color.BrightYellow,Color.DarkGray),
+            Disabled  = Attr(Color.DarkGray,    Color.Black),
+        };
+
+        // Status bar sits on a blue band with bright-yellow shortcut letters.
+        var statusScheme = new ColorScheme
+        {
+            Normal    = Attr(Color.White,       Color.Blue),
+            Focus     = Attr(Color.White,       Color.Blue),
+            HotNormal = Attr(Color.BrightYellow,Color.Blue),
+            HotFocus  = Attr(Color.BrightYellow,Color.Blue),
+            Disabled  = Attr(Color.DarkGray,    Color.Blue),
+        };
+
+        // Pane-title labels: bold cyan on base background.
+        var titleScheme = new ColorScheme
+        {
+            Normal    = Attr(Color.BrightCyan,  Color.Black),
+            Focus     = Attr(Color.BrightCyan,  Color.Black),
+            HotNormal = Attr(Color.BrightCyan,  Color.Black),
+            HotFocus  = Attr(Color.BrightCyan,  Color.Black),
+            Disabled  = Attr(Color.DarkGray,    Color.Black),
+        };
+
+        // Separator lines: dim gray, distinct from content.
+        var separatorScheme = new ColorScheme
+        {
+            Normal    = Attr(Color.DarkGray,    Color.Black),
+            Focus     = Attr(Color.DarkGray,    Color.Black),
+            HotNormal = Attr(Color.DarkGray,    Color.Black),
+            HotFocus  = Attr(Color.DarkGray,    Color.Black),
+            Disabled  = Attr(Color.DarkGray,    Color.Black),
+        };
+
+        return new Theme(baseScheme, focusScheme, statusScheme, titleScheme, separatorScheme);
+    }
+}
 
 // ---------- timeline node hierarchy ----------
 
@@ -126,18 +194,21 @@ sealed class TurnGroup : TimelineNode
 
 // ---------- main view ----------
 
-sealed class InspectorView : Window
+sealed class InspectorView : View
 {
     private enum DetailMode { Raw, Rendered }
 
+    private const int SessionPaneWidth = 30;
+
     private readonly ListView _sessionList;
     private readonly TreeView<TimelineNode> _timeline;
-    private readonly FrameView _detailPane;
+    private readonly Label _detailHeader;
     private readonly TextView _detail;
     private readonly string _sessionsDir;
     private readonly bool _follow;
     private readonly StatusItem _statusInfo;
     private readonly StatusBar _statusBar;
+    private readonly Theme _theme;
 
     private List<string> _sessionFiles = new();
     private List<Events.SessionEvent> _currentEvents = new();
@@ -154,66 +225,95 @@ sealed class InspectorView : Window
         string sessionsDir,
         bool follow,
         StatusItem statusInfo,
-        StatusBar statusBar)
+        StatusBar statusBar,
+        Theme theme)
     {
         _sessionsDir = sessionsDir;
         _follow = follow;
         _statusInfo = statusInfo;
         _statusBar = statusBar;
-        var followTag = follow ? "  [follow]" : "";
-        Title = $"minus-view — {sessionsDir}{followTag}  (Tab switches panes)";
+        _theme = theme;
+        CanFocus = true;
 
-        var sessionPane = new FrameView("Sessions")
+        // Layout math:
+        //   col 0         : margin
+        //   cols 1..30    : sessions pane (width 30)
+        //   col 31        : margin
+        //   col 32        : vertical separator │
+        //   col 33        : margin
+        //   cols 34..     : right-side panes (timeline on top, detail below)
+        const int sessionX = 1;
+        const int vSepX = sessionX + SessionPaneWidth + 1;  // 32
+        const int rightX = vSepX + 2;                       // 34
+
+        var sessionsHeader = new Label("Sessions")
         {
-            X = 0, Y = 0,
-            Width = 34, Height = Dim.Fill(),
+            X = sessionX, Y = 0,
+            Width = SessionPaneWidth, Height = 1,
+            ColorScheme = theme.Title,
         };
         _sessionList = new ListView(new List<string>())
         {
-            X = 0, Y = 0,
-            Width = Dim.Fill(), Height = Dim.Fill(),
+            X = sessionX, Y = 1,
+            Width = SessionPaneWidth, Height = Dim.Fill(),
             AllowsMarking = false,
+            ColorScheme = theme.Focus,
         };
-        sessionPane.Add(_sessionList);
 
-        var timelinePane = new FrameView("Timeline")
+        var vSep = new LineView(Orientation.Vertical)
         {
-            X = Pos.Right(sessionPane),
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Percent(55),
+            X = vSepX, Y = 0,
+            Height = Dim.Fill(),
+            ColorScheme = theme.Separator,
+        };
+
+        var timelineHeader = new Label("Timeline")
+        {
+            X = rightX, Y = 0,
+            Width = Dim.Fill(1), Height = 1,
+            ColorScheme = theme.Title,
         };
         _timeline = new TreeView<TimelineNode>
         {
-            X = 0, Y = 0,
-            Width = Dim.Fill(), Height = Dim.Fill(),
+            X = rightX, Y = 1,
+            Width = Dim.Fill(1),
+            Height = Dim.Percent(55),
             AspectGetter = n => n.Display,
             TreeBuilder = new DelegateTreeBuilder<TimelineNode>(n => n.Children),
+            ColorScheme = theme.Focus,
         };
-        timelinePane.Add(_timeline);
 
-        _detailPane = new FrameView("Event [raw]")
+        var hSep = new LineView(Orientation.Horizontal)
         {
-            X = Pos.Right(sessionPane),
-            Y = Pos.Bottom(timelinePane),
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
+            X = rightX, Y = Pos.Bottom(_timeline),
+            Width = Dim.Fill(1),
+            ColorScheme = theme.Separator,
+        };
+
+        _detailHeader = new Label("Event [raw]")
+        {
+            X = rightX, Y = Pos.Bottom(hSep),
+            Width = Dim.Fill(1), Height = 1,
+            ColorScheme = theme.Title,
         };
         _detail = new TextView
         {
-            X = 0, Y = 0,
-            Width = Dim.Fill(), Height = Dim.Fill(),
-            ReadOnly = true, WordWrap = false,
+            X = rightX, Y = Pos.Bottom(_detailHeader),
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(),
+            ReadOnly = true,
+            WordWrap = false,
+            ColorScheme = theme.Base,
         };
-        _detailPane.Add(_detail);
 
-        Add(sessionPane, timelinePane, _detailPane);
+        Add(sessionsHeader, _sessionList, vSep,
+            timelineHeader, _timeline, hSep,
+            _detailHeader, _detail);
 
         _sessionList.SelectedItemChanged += args => LoadSession(args.Item);
         _timeline.SelectionChanged += (_, args) => ShowDetailFor(args.NewValue);
 
         KeyPress += OnKeyPress;
-        Closing += (_) => StopFollow();
 
         LoadSessionList();
     }
@@ -223,6 +323,7 @@ sealed class InspectorView : Window
         switch (e.KeyEvent.Key)
         {
             case Key.q or Key.Q:
+                StopFollow();
                 Application.RequestStop();
                 e.Handled = true;
                 break;
@@ -240,7 +341,7 @@ sealed class InspectorView : Window
     private void ToggleDetailMode()
     {
         _detailMode = _detailMode == DetailMode.Raw ? DetailMode.Rendered : DetailMode.Raw;
-        UpdateDetailPaneTitle();
+        UpdateDetailHeader();
         ShowDetailFor(_timeline.SelectedObject);
     }
 
@@ -248,15 +349,15 @@ sealed class InspectorView : Window
     {
         _wordWrap = !_wordWrap;
         _detail.WordWrap = _wordWrap;
-        UpdateDetailPaneTitle();
+        UpdateDetailHeader();
     }
 
-    private void UpdateDetailPaneTitle()
+    private void UpdateDetailHeader()
     {
         var mode = _detailMode == DetailMode.Raw ? "raw" : "rendered";
         var wrap = _wordWrap ? " wrap" : "";
-        _detailPane.Title = $"Event [{mode}{wrap}]";
-        _detailPane.SetNeedsDisplay();
+        _detailHeader.Text = $"Event [{mode}{wrap}]";
+        _detailHeader.SetNeedsDisplay();
     }
 
     private void LoadSessionList()
