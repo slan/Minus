@@ -5,11 +5,25 @@ using Events = Minus.Core.Events;
 
 // minus-view — read-only TUI for inspecting Minus session transcripts.
 // Three panes: session list (left), event timeline (top-right), event
-// detail as pretty JSON (bottom-right). Follow mode comes in a later step.
+// detail as pretty JSON (bottom-right). Pass --follow to live-tail the
+// selected session as the agent appends events.
 
-string sessionsDir = args.Length > 0
-    ? args[0]
-    : Path.Combine(Directory.GetCurrentDirectory(), "sessions");
+bool follow = false;
+string? sessionsDir = null;
+for (int i = 0; i < args.Length; i++)
+{
+    switch (args[i])
+    {
+        case "--follow":
+        case "-f":
+            follow = true;
+            break;
+        default:
+            sessionsDir ??= args[i];
+            break;
+    }
+}
+sessionsDir ??= Path.Combine(Directory.GetCurrentDirectory(), "sessions");
 
 if (!Directory.Exists(sessionsDir))
 {
@@ -20,7 +34,7 @@ if (!Directory.Exists(sessionsDir))
 Application.Init();
 try
 {
-    Application.Run(new InspectorView(sessionsDir));
+    Application.Run(new InspectorView(sessionsDir, follow));
 }
 finally
 {
@@ -34,13 +48,23 @@ sealed class InspectorView : Window
     private readonly ListView _timeline;
     private readonly TextView _detail;
     private readonly string _sessionsDir;
+    private readonly bool _follow;
+
     private List<string> _sessionFiles = new();
     private List<Events.SessionEvent> _currentEvents = new();
 
-    public InspectorView(string sessionsDir)
+    // Follow-mode state: held open on the selected session, polled via a
+    // MainLoop timeout, torn down on session change / quit.
+    private FileStream? _followStream;
+    private StreamReader? _followReader;
+    private object? _followTimerToken;
+
+    public InspectorView(string sessionsDir, bool follow)
     {
         _sessionsDir = sessionsDir;
-        Title = $"minus-view — {sessionsDir}  (q to quit, Tab to switch panes)";
+        _follow = follow;
+        var suffix = follow ? "  [follow]" : "";
+        Title = $"minus-view — {sessionsDir}{suffix}  (q to quit, Tab to switch panes)";
 
         var sessionPane = new FrameView("Sessions")
         {
@@ -100,6 +124,7 @@ sealed class InspectorView : Window
         _timeline.SelectedItemChanged += args => ShowDetail(args.Item);
 
         KeyPress += OnKeyPress;
+        Closing += (_) => StopFollow();
 
         LoadSessionList();
     }
@@ -120,8 +145,7 @@ sealed class InspectorView : Window
             .OrderByDescending(f => f)
             .ToList();
         var labels = _sessionFiles
-            .Select(Path.GetFileNameWithoutExtension)
-            .Cast<string>()
+            .Select(f => Path.GetFileNameWithoutExtension(f)!)
             .ToList();
         _sessionList.SetSource(labels);
         if (_sessionFiles.Count > 0)
@@ -133,21 +157,41 @@ sealed class InspectorView : Window
 
     private void LoadSession(int idx)
     {
+        StopFollow();
         if (idx < 0 || idx >= _sessionFiles.Count) return;
         var path = _sessionFiles[idx];
+        FileStream? stream = null;
+        StreamReader? reader = null;
         try
         {
-            _currentEvents = TranscriptReader.Read(path).ToList();
-            var rows = _currentEvents.Select(Summary).ToList();
-            _timeline.SetSource(rows);
-            if (_currentEvents.Count > 0)
+            // Inline the read instead of using TranscriptReader.Read so we can
+            // hand off the same stream to follow mode — otherwise there's a
+            // narrow race where the agent appends between close-and-reopen
+            // and we miss those events.
+            stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            reader = new StreamReader(stream);
+            _currentEvents = new List<Events.SessionEvent>();
+            while (reader.ReadLine() is { } line)
             {
-                _timeline.SelectedItem = 0;
-                ShowDetail(0);
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                var ev = JsonSerializer.Deserialize<Events.SessionEvent>(line, Json.Options)
+                    ?? throw new FormatException("null SessionEvent after deserialization");
+                _currentEvents.Add(ev);
             }
-            else
+
+            RefreshTimeline(preserveSelection: false);
+            if (_currentEvents.Count > 0) ShowDetail(0);
+            else _detail.Text = "(empty session)";
+
+            if (_follow)
             {
-                _detail.Text = "(empty session)";
+                _followStream = stream;
+                _followReader = reader;
+                stream = null;
+                reader = null;
+                _followTimerToken = Application.MainLoop.AddTimeout(
+                    TimeSpan.FromMilliseconds(500),
+                    _ => { PollFollow(); return true; });
             }
         }
         catch (Exception ex)
@@ -162,6 +206,12 @@ sealed class InspectorView : Window
                 $"This is expected for transcripts written before the typed-event\n" +
                 $"schema change. Delete the file or start a new session.";
         }
+        finally
+        {
+            // If we handed the stream off to follow mode these are null; else close.
+            reader?.Dispose();
+            stream?.Dispose();
+        }
     }
 
     private void ShowDetail(int idx)
@@ -169,6 +219,63 @@ sealed class InspectorView : Window
         if (idx < 0 || idx >= _currentEvents.Count) return;
         var options = new JsonSerializerOptions(Json.Options) { WriteIndented = true };
         _detail.Text = JsonSerializer.Serialize<Events.SessionEvent>(_currentEvents[idx], options);
+    }
+
+    private void RefreshTimeline(bool preserveSelection)
+    {
+        var prevIdx = _timeline.SelectedItem;
+        var wasAtBottom = _currentEvents.Count > 0 && prevIdx >= _currentEvents.Count - 1;
+        var rows = _currentEvents.Select(Summary).ToList();
+        _timeline.SetSource(rows);
+        if (rows.Count == 0) return;
+        if (!preserveSelection) _timeline.SelectedItem = 0;
+        else if (wasAtBottom) _timeline.SelectedItem = rows.Count - 1;
+        else if (prevIdx >= 0 && prevIdx < rows.Count) _timeline.SelectedItem = prevIdx;
+    }
+
+    private void PollFollow()
+    {
+        if (_followReader is null) return;
+        var added = 0;
+        try
+        {
+            while (_followReader.ReadLine() is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var ev = JsonSerializer.Deserialize<Events.SessionEvent>(line, Json.Options);
+                    if (ev is not null)
+                    {
+                        _currentEvents.Add(ev);
+                        added++;
+                    }
+                }
+                catch
+                {
+                    // Skip unparseable line silently; the writer shouldn't produce them.
+                }
+            }
+        }
+        catch
+        {
+            StopFollow();
+            return;
+        }
+        if (added > 0) RefreshTimeline(preserveSelection: true);
+    }
+
+    private void StopFollow()
+    {
+        if (_followTimerToken is not null)
+        {
+            Application.MainLoop.RemoveTimeout(_followTimerToken);
+            _followTimerToken = null;
+        }
+        _followReader?.Dispose();
+        _followStream?.Dispose();
+        _followReader = null;
+        _followStream = null;
     }
 
     private static string Summary(Events.SessionEvent ev) => ev switch
