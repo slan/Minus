@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Minus.Core;
 using Terminal.Gui;
@@ -35,19 +36,20 @@ try
 {
     var top = Application.Top;
 
-    // Dynamic "info" status item; mutable Title is updated by InspectorView.
     var statusInfo = new StatusItem(Key.Null, "(no session)", null);
     var statusBar = new StatusBar(new[]
     {
         statusInfo,
-        new StatusItem(Key.q | Key.CtrlMask, "~^Q Quit", () => Application.RequestStop()),
+        new StatusItem(Key.r, "~r Raw/Rendered", null),
+        new StatusItem(Key.w, "~w Wrap", null),
+        new StatusItem(Key.q, "~q Quit", null),
     });
 
     var inspector = new InspectorView(sessionsDir, follow, statusInfo, statusBar)
     {
         Y = 0,
         Width = Dim.Fill(),
-        Height = Dim.Fill(1), // leave 1 row for the StatusBar
+        Height = Dim.Fill(1),
     };
 
     top.Add(inspector);
@@ -62,8 +64,11 @@ return 0;
 
 sealed class InspectorView : Window
 {
+    private enum DetailMode { Raw, Rendered }
+
     private readonly ListView _sessionList;
     private readonly ListView _timeline;
+    private readonly FrameView _detailPane;
     private readonly TextView _detail;
     private readonly string _sessionsDir;
     private readonly bool _follow;
@@ -73,8 +78,9 @@ sealed class InspectorView : Window
     private List<string> _sessionFiles = new();
     private List<Events.SessionEvent> _currentEvents = new();
 
-    // Follow-mode state: held open on the selected session, polled via a
-    // MainLoop timeout, torn down on session change / quit.
+    private DetailMode _detailMode = DetailMode.Raw;
+    private bool _wordWrap;
+
     private FileStream? _followStream;
     private StreamReader? _followReader;
     private object? _followTimerToken;
@@ -89,8 +95,8 @@ sealed class InspectorView : Window
         _follow = follow;
         _statusInfo = statusInfo;
         _statusBar = statusBar;
-        var suffix = follow ? "  [follow]" : "";
-        Title = $"minus-view — {sessionsDir}{suffix}  (Tab switches panes)";
+        var followTag = follow ? "  [follow]" : "";
+        Title = $"minus-view — {sessionsDir}{followTag}  (Tab switches panes)";
 
         var sessionPane = new FrameView("Sessions")
         {
@@ -126,7 +132,7 @@ sealed class InspectorView : Window
         };
         timelinePane.Add(_timeline);
 
-        var detailPane = new FrameView("Event")
+        _detailPane = new FrameView("Event [raw]")
         {
             X = Pos.Right(sessionPane),
             Y = Pos.Bottom(timelinePane),
@@ -142,9 +148,9 @@ sealed class InspectorView : Window
             ReadOnly = true,
             WordWrap = false,
         };
-        detailPane.Add(_detail);
+        _detailPane.Add(_detail);
 
-        Add(sessionPane, timelinePane, detailPane);
+        Add(sessionPane, timelinePane, _detailPane);
 
         _sessionList.SelectedItemChanged += args => LoadSession(args.Item);
         _timeline.SelectedItemChanged += args => ShowDetail(args.Item);
@@ -157,11 +163,43 @@ sealed class InspectorView : Window
 
     private void OnKeyPress(KeyEventEventArgs e)
     {
-        if (e.KeyEvent.Key is Key.q or Key.Q)
+        switch (e.KeyEvent.Key)
         {
-            Application.RequestStop();
-            e.Handled = true;
+            case Key.q or Key.Q:
+                Application.RequestStop();
+                e.Handled = true;
+                break;
+            case Key.r or Key.R:
+                ToggleDetailMode();
+                e.Handled = true;
+                break;
+            case Key.w or Key.W:
+                ToggleWordWrap();
+                e.Handled = true;
+                break;
         }
+    }
+
+    private void ToggleDetailMode()
+    {
+        _detailMode = _detailMode == DetailMode.Raw ? DetailMode.Rendered : DetailMode.Raw;
+        UpdateDetailPaneTitle();
+        ShowDetail(_timeline.SelectedItem);
+    }
+
+    private void ToggleWordWrap()
+    {
+        _wordWrap = !_wordWrap;
+        _detail.WordWrap = _wordWrap;
+        UpdateDetailPaneTitle();
+    }
+
+    private void UpdateDetailPaneTitle()
+    {
+        var mode = _detailMode == DetailMode.Raw ? "raw" : "rendered";
+        var wrap = _wordWrap ? " wrap" : "";
+        _detailPane.Title = $"Event [{mode}{wrap}]";
+        _detailPane.SetNeedsDisplay();
     }
 
     private void LoadSessionList()
@@ -243,8 +281,8 @@ sealed class InspectorView : Window
     private void ShowDetail(int idx)
     {
         if (idx < 0 || idx >= _currentEvents.Count) return;
-        var options = new JsonSerializerOptions(Json.Options) { WriteIndented = true };
-        _detail.Text = JsonSerializer.Serialize<Events.SessionEvent>(_currentEvents[idx], options);
+        var ev = _currentEvents[idx];
+        _detail.Text = _detailMode == DetailMode.Raw ? RenderRaw(ev) : RenderEvent(ev);
     }
 
     private void RefreshTimeline(bool preserveSelection)
@@ -277,7 +315,7 @@ sealed class InspectorView : Window
                         added++;
                     }
                 }
-                catch { /* skip poison line, writer shouldn't produce one */ }
+                catch { /* skip poison line; writer shouldn't produce one */ }
             }
         }
         catch
@@ -315,22 +353,14 @@ sealed class InspectorView : Window
 
         var count = _currentEvents.Count;
 
-        // Token stats from the most recent llm_response with usage.
         var lastUsage = _currentEvents
             .OfType<Events.LlmResponse>()
             .Select(r => r.Body.Usage)
             .LastOrDefault(u => u is not null);
 
-        string tokens;
-        if (lastUsage is null)
-        {
-            tokens = "";
-        }
-        else
-        {
-            tokens = $" | ctx {Format(lastUsage.PromptTokens)} tok " +
-                     $"(+{Format(lastUsage.CompletionTokens)} gen)";
-        }
+        var tokens = lastUsage is null
+            ? ""
+            : $" | ctx {FormatK(lastUsage.PromptTokens)} tok (+{FormatK(lastUsage.CompletionTokens)} gen)";
 
         var followTag = _follow ? " | [following]" : "";
 
@@ -338,7 +368,178 @@ sealed class InspectorView : Window
         _statusBar.SetNeedsDisplay();
     }
 
-    private static string Format(int n) =>
+    // ---------- raw-mode rendering ----------
+
+    private static string RenderRaw(Events.SessionEvent ev)
+    {
+        var options = new JsonSerializerOptions(Json.Options) { WriteIndented = true };
+        return JsonSerializer.Serialize<Events.SessionEvent>(ev, options);
+    }
+
+    // ---------- rendered-mode ("human-friendly") rendering ----------
+
+    private static string RenderEvent(Events.SessionEvent ev) => ev switch
+    {
+        Events.Meta m        => RenderMeta(m),
+        Events.UserInput u   => RenderUserInput(u),
+        Events.LlmRequest r  => RenderLlmRequest(r),
+        Events.LlmResponse r => RenderLlmResponse(r),
+        Events.ToolCall c    => RenderToolCall(c),
+        Events.ToolResult t  => RenderToolResult(t),
+        Events.Error e       => RenderError(e),
+        Events.End           => "session ended",
+        _                    => $"({ev.GetType().Name})",
+    };
+
+    private static string RenderMeta(Events.Meta m) =>
+        "SESSION STARTED\n" +
+        $"  session_id: {m.SessionId}\n" +
+        $"  persona:    {m.Persona}\n" +
+        $"  model:      {m.Model} @ {m.Endpoint}\n" +
+        $"  cwd:        {m.Cwd}\n" +
+        $"  minus:      {m.MinusVersion ?? "(unknown)"}\n" +
+        $"  tools:      {string.Join(", ", m.Tools)}\n";
+
+    private static string RenderUserInput(Events.UserInput u) =>
+        "USER\n\n" + Indent(u.Content, "  ");
+
+    private static string RenderLlmRequest(Events.LlmRequest r)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"REQUEST  (turn {Short(r.TurnId)})");
+        sb.AppendLine($"model: {r.Body.Model}");
+        sb.AppendLine("messages:");
+        for (int i = 0; i < r.Body.Messages.Count; i++)
+        {
+            var msg = r.Body.Messages[i];
+            sb.AppendLine($"  [{i + 1}] {msg.Role}");
+            if (!string.IsNullOrEmpty(msg.Content))
+                sb.Append(Indent(msg.Content, "      ")).AppendLine();
+            if (msg.ToolCalls is { Count: > 0 })
+                foreach (var tc in msg.ToolCalls)
+                    sb.AppendLine($"      → {tc.Function.Name}({tc.Function.Arguments})");
+        }
+        if (r.Body.Tools is { Count: > 0 })
+            sb.AppendLine($"tools: {string.Join(", ", r.Body.Tools.Select(t => t.Function.Name))}");
+        if (!string.IsNullOrEmpty(r.Body.ToolChoice))
+            sb.AppendLine($"tool_choice: {r.Body.ToolChoice}");
+        return sb.ToString();
+    }
+
+    private static string RenderLlmResponse(Events.LlmResponse r)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"RESPONSE  (turn {Short(r.TurnId)}, {r.DurationMs}ms)");
+
+        if (r.Body.Usage is { } u)
+            sb.AppendLine($"tokens:  prompt={u.PromptTokens}  completion={u.CompletionTokens}  total={u.TotalTokens}");
+
+        if (r.Body.Timings is { } t)
+        {
+            var parts = new List<string>();
+            if (t.PromptMs.HasValue && t.PromptPerSecond.HasValue)
+                parts.Add($"prompt {t.PromptMs:0}ms @ {t.PromptPerSecond:0} t/s");
+            if (t.PredictedMs.HasValue && t.PredictedPerSecond.HasValue)
+                parts.Add($"predict {t.PredictedMs:0}ms @ {t.PredictedPerSecond:0} t/s");
+            if (parts.Count > 0)
+                sb.AppendLine($"server:  {string.Join("   ", parts)}");
+        }
+
+        foreach (var choice in r.Body.Choices)
+        {
+            sb.AppendLine();
+            var msg = choice.Message;
+            if (!string.IsNullOrEmpty(msg.ReasoningContent))
+            {
+                sb.AppendLine("reasoning:");
+                sb.Append(Indent(msg.ReasoningContent, "  ")).AppendLine();
+                sb.AppendLine();
+            }
+            if (!string.IsNullOrEmpty(msg.Content))
+            {
+                sb.AppendLine("content:");
+                sb.Append(Indent(msg.Content, "  ")).AppendLine();
+            }
+            if (msg.ToolCalls is { Count: > 0 })
+            {
+                sb.AppendLine("tool_calls:");
+                foreach (var tc in msg.ToolCalls)
+                    sb.AppendLine($"  → {tc.Function.Name}({tc.Function.Arguments})");
+            }
+            if (!string.IsNullOrEmpty(choice.FinishReason))
+                sb.AppendLine($"finish: {choice.FinishReason}");
+        }
+        return sb.ToString();
+    }
+
+    private static string RenderToolCall(Events.ToolCall c)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"TOOL CALL  (turn {Short(c.TurnId)})");
+        sb.AppendLine($"name:    {c.Name}");
+        sb.AppendLine($"call_id: {c.CallId}");
+        sb.AppendLine("arguments:");
+        sb.Append(Indent(PrettyJsonOrRaw(c.Arguments), "  ")).AppendLine();
+        return sb.ToString();
+    }
+
+    private static string RenderToolResult(Events.ToolResult t)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"TOOL RESULT  (call {Short(t.CallId)}, {t.DurationMs}ms)");
+        if (!string.IsNullOrEmpty(t.Error))
+        {
+            sb.AppendLine("ERROR:");
+            sb.Append(Indent(t.Error, "  ")).AppendLine();
+        }
+        else if (!string.IsNullOrEmpty(t.Content))
+        {
+            sb.AppendLine("content:");
+            sb.Append(Indent(t.Content, "  ")).AppendLine();
+        }
+        else
+        {
+            sb.AppendLine("(no content)");
+        }
+        return sb.ToString();
+    }
+
+    private static string RenderError(Events.Error e)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"ERROR  [phase: {e.Phase}]");
+        if (e.HttpStatus.HasValue) sb.AppendLine($"http_status: {e.HttpStatus}");
+        if (!string.IsNullOrEmpty(e.Code)) sb.AppendLine($"code: {e.Code}");
+        sb.AppendLine("message:");
+        sb.Append(Indent(e.Message, "  ")).AppendLine();
+        sb.AppendLine($"retryable: {e.Retryable}");
+        return sb.ToString();
+    }
+
+    // ---------- helpers ----------
+
+    private static string Indent(string text, string prefix) =>
+        string.Join("\n",
+            text.Replace("\r\n", "\n").Split('\n').Select(line => prefix + line));
+
+    private static string PrettyJsonOrRaw(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return "{}";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return JsonSerializer.Serialize(doc.RootElement, new JsonSerializerOptions { WriteIndented = true });
+        }
+        catch
+        {
+            return json;
+        }
+    }
+
+    private static string Short(string? id) =>
+        id is null ? "(none)" : id[..Math.Min(id.Length, 8)];
+
+    private static string FormatK(int n) =>
         n >= 1000 ? $"{n / 1000.0:0.#}k" : n.ToString();
 
     private static string Summary(Events.SessionEvent ev) => ev switch
