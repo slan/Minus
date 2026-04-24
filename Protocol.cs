@@ -10,7 +10,8 @@ public record Message(
     string? Content = null,
     List<ToolCall>? ToolCalls = null,
     string? ToolCallId = null,
-    string? Name = null
+    string? Name = null,
+    string? ReasoningContent = null
 );
 
 public record ToolCall(string Id, string Type, FunctionCall Function);

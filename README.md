@@ -15,17 +15,17 @@ Minus keeps the loop small and readable: one chat history, one tool registry, on
 dotnet run
 ```
 
-By default Minus connects to `http://localhost:8080` and uses the `default` persona.
+By default Minus connects to `http://127.0.0.1:8080` and uses the `default` persona. (The literal `127.0.0.1` matters on Windows — resolving `localhost` can add a ~21s stall per request while the IPv6 attempt times out before falling back to IPv4.)
 
 Override via flags or environment variables:
 
 ```sh
-dotnet run -- --endpoint http://localhost:8080 --model local --persona default
+dotnet run -- --endpoint http://127.0.0.1:8080 --model local --persona default
 ```
 
 | Flag         | Env var           | Default                  |
 | ------------ | ----------------- | ------------------------ |
-| `--endpoint` | `MINUS_ENDPOINT`  | `http://localhost:8080`  |
+| `--endpoint` | `MINUS_ENDPOINT`  | `http://127.0.0.1:8080`  |
 | `--model`    | `MINUS_MODEL`     | `local`                  |
 | `--persona`  | —                 | `default`                |
 

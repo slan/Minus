@@ -1,7 +1,9 @@
 using Minus;
 using Minus.Tools;
 
-var endpoint = Environment.GetEnvironmentVariable("MINUS_ENDPOINT") ?? "http://localhost:8080";
+// 127.0.0.1 (not `localhost`) avoids a ~21s IPv6-fallback stall on Windows
+// when the llama.cpp container's port forwarder only binds IPv4.
+var endpoint = Environment.GetEnvironmentVariable("MINUS_ENDPOINT") ?? "http://127.0.0.1:8080";
 var model = Environment.GetEnvironmentVariable("MINUS_MODEL") ?? "local";
 var personaName = "default";
 

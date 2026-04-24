@@ -46,6 +46,9 @@ public sealed class LlamaClient
             ?? throw new Exception("null response from llama.cpp");
         _transcript.Log("llm_response", resp);
 
-        return resp.Choices[0].Message;
+        // Reasoning content is logged above for visibility but MUST NOT be
+        // echoed back in subsequent turns — reasoning models expect prior
+        // turns' history to contain only the final answer.
+        return resp.Choices[0].Message with { ReasoningContent = null };
     }
 }
