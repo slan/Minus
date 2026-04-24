@@ -11,12 +11,12 @@ public sealed class Agent
     public int MaxIterations { get; init; } = 25;
 
     private readonly LlamaClient _client;
-    private readonly TranscriptWriter _transcript;
+    private readonly ISessionEventSink _transcript;
     private readonly Dictionary<string, ITool> _tools;
     private readonly List<ToolDefinition> _toolDefs;
     private readonly List<Message> _history = new();
 
-    public Agent(string systemPrompt, LlamaClient client, TranscriptWriter transcript, IEnumerable<ITool> tools)
+    public Agent(string systemPrompt, LlamaClient client, ISessionEventSink transcript, IEnumerable<ITool> tools)
     {
         SystemPrompt = systemPrompt;
         _client = client;

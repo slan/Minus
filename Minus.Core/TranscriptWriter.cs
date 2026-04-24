@@ -3,7 +3,7 @@ using Minus.Core.Events;
 
 namespace Minus.Core;
 
-public sealed class TranscriptWriter : IDisposable
+public sealed class TranscriptWriter : IDisposable, ISessionEventSink
 {
     private readonly StreamWriter _writer;
     public string Path { get; }

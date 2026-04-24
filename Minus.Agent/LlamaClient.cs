@@ -10,9 +10,9 @@ public sealed class LlamaClient
 {
     private readonly HttpClient _http;
     private readonly string _model;
-    private readonly TranscriptWriter _transcript;
+    private readonly ISessionEventSink _transcript;
 
-    public LlamaClient(string endpoint, string model, TranscriptWriter transcript)
+    public LlamaClient(string endpoint, string model, ISessionEventSink transcript)
     {
         _http = new HttpClient
         {
