@@ -10,19 +10,50 @@ namespace Minus;
 // (UserInput) or would just be noise (LlmRequest, SessionEnd).
 public sealed class ConsoleUi : ISessionEventSink
 {
+    private readonly AsyncConsole _console;
+
+    public ConsoleUi(AsyncConsole console)
+    {
+        _console = console;
+    }
+
     public void Log(Events.SessionEvent ev)
     {
-        switch (ev)
+        _console.WriteAboveInput(() =>
         {
-            case Events.Meta m:        RenderMeta(m); break;
-            case Events.LlmResponse r: RenderAssistant(r); break;
-            case Events.ToolCall c:    RenderToolCall(c); break;
-            case Events.ToolResult t:  RenderToolResult(t); break;
-            case Events.Error e:       RenderError(e); break;
-            // UserInput: terminal already echoed what the user typed.
-            // LlmRequest: internal plumbing, not worth surfacing.
-            // End: handled by the REPL loop, not the sink.
-        }
+            switch (ev)
+            {
+                case Events.Meta m:        RenderMeta(m); break;
+                case Events.LlmResponse r: RenderAssistant(r); break;
+                case Events.ToolCall c:    RenderToolCall(c); break;
+                case Events.ToolResult t:  RenderToolResult(t); break;
+                case Events.Error e:       RenderError(e); break;
+                // UserInput: we render it ourselves at submit time so it
+                // shows up as a styled block above the content (below).
+                // LlmRequest: internal plumbing, not worth surfacing.
+                // End: handled by the REPL loop.
+            }
+        });
+    }
+
+    // Call this from the input loop when a user submission is accepted,
+    // so the submitted text renders as a styled block in the scrollback.
+    // Must go through the same lock the sink uses.
+    public void ShowSubmitted(string content)
+    {
+        _console.WriteAboveInput(() =>
+        {
+            AnsiConsole.MarkupLine($"[cyan]> {Markup.Escape(content)}[/]");
+        });
+    }
+
+    // Call this when a turn is interrupted by Escape/Ctrl+C.
+    public void ShowInterrupt()
+    {
+        _console.WriteAboveInput(() =>
+        {
+            AnsiConsole.MarkupLine("[yellow]⚠ interrupted[/]");
+        });
     }
 
     private static void RenderMeta(Events.Meta m)
