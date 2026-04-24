@@ -2,11 +2,12 @@ using System.Text;
 using System.Text.Json;
 using Minus.Core;
 using Terminal.Gui;
+using Terminal.Gui.Trees;
 using Events = Minus.Core.Events;
 
 // minus-view — read-only TUI for inspecting Minus session transcripts.
-// Three panes (session list / timeline / event detail) plus a status bar.
-// Pass --follow to live-tail the selected session as the agent appends.
+// Three panes (session list / grouped timeline / event detail) plus a
+// status bar. Pass --follow to live-tail the selected session.
 
 bool follow = false;
 string? sessionsDir = null;
@@ -62,12 +63,75 @@ finally
 }
 return 0;
 
+// ---------- timeline node hierarchy ----------
+
+abstract class TimelineNode
+{
+    public abstract string Display { get; }
+    public virtual IEnumerable<TimelineNode> Children => Array.Empty<TimelineNode>();
+    public abstract Events.SessionEvent? BackingEvent { get; }
+}
+
+sealed class EventNode : TimelineNode
+{
+    public Events.SessionEvent Event { get; }
+    private readonly string _display;
+    public EventNode(Events.SessionEvent ev, string display)
+    {
+        Event = ev;
+        _display = display;
+    }
+    public override string Display => _display;
+    public override Events.SessionEvent BackingEvent => Event;
+}
+
+sealed class TurnGroup : TimelineNode
+{
+    public string TurnId { get; }
+    public List<EventNode> ChildNodes { get; } = new();
+
+    public TurnGroup(string turnId) { TurnId = turnId; }
+
+    public override IEnumerable<TimelineNode> Children => ChildNodes;
+    public override Events.SessionEvent? BackingEvent => null;
+
+    public override string Display
+    {
+        get
+        {
+            if (ChildNodes.Count == 0) return $"Turn {Short(TurnId)}";
+            var first = ChildNodes[0].Event.Ts;
+            var last = ChildNodes[^1].Event.Ts;
+            var dur = (long)(last - first).TotalMilliseconds;
+            var tokens = ChildNodes
+                .Select(n => n.Event)
+                .OfType<Events.LlmResponse>()
+                .Select(r => r.Body.Usage?.TotalTokens ?? 0)
+                .Sum();
+            var toolCalls = ChildNodes
+                .Select(n => n.Event)
+                .OfType<Events.ToolCall>()
+                .Count();
+            var parts = new List<string> { $"{ChildNodes.Count} events" };
+            if (dur > 0) parts.Add($"{dur}ms");
+            if (tokens > 0) parts.Add($"{FormatK(tokens)} tok");
+            if (toolCalls > 0) parts.Add($"{toolCalls} tools");
+            return $"Turn {Short(TurnId)}  —  {string.Join(", ", parts)}";
+        }
+    }
+
+    private static string Short(string id) => id[..Math.Min(id.Length, 8)];
+    private static string FormatK(int n) => n >= 1000 ? $"{n / 1000.0:0.#}k" : n.ToString();
+}
+
+// ---------- main view ----------
+
 sealed class InspectorView : Window
 {
     private enum DetailMode { Raw, Rendered }
 
     private readonly ListView _sessionList;
-    private readonly ListView _timeline;
+    private readonly TreeView<TimelineNode> _timeline;
     private readonly FrameView _detailPane;
     private readonly TextView _detail;
     private readonly string _sessionsDir;
@@ -77,6 +141,7 @@ sealed class InspectorView : Window
 
     private List<string> _sessionFiles = new();
     private List<Events.SessionEvent> _currentEvents = new();
+    private List<TimelineNode> _timelineNodes = new();
 
     private DetailMode _detailMode = DetailMode.Raw;
     private bool _wordWrap;
@@ -100,17 +165,13 @@ sealed class InspectorView : Window
 
         var sessionPane = new FrameView("Sessions")
         {
-            X = 0,
-            Y = 0,
-            Width = 34,
-            Height = Dim.Fill(),
+            X = 0, Y = 0,
+            Width = 34, Height = Dim.Fill(),
         };
         _sessionList = new ListView(new List<string>())
         {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
+            X = 0, Y = 0,
+            Width = Dim.Fill(), Height = Dim.Fill(),
             AllowsMarking = false,
         };
         sessionPane.Add(_sessionList);
@@ -122,13 +183,12 @@ sealed class InspectorView : Window
             Width = Dim.Fill(),
             Height = Dim.Percent(55),
         };
-        _timeline = new ListView(new List<string>())
+        _timeline = new TreeView<TimelineNode>
         {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            AllowsMarking = false,
+            X = 0, Y = 0,
+            Width = Dim.Fill(), Height = Dim.Fill(),
+            AspectGetter = n => n.Display,
+            TreeBuilder = new DelegateTreeBuilder<TimelineNode>(n => n.Children),
         };
         timelinePane.Add(_timeline);
 
@@ -141,19 +201,16 @@ sealed class InspectorView : Window
         };
         _detail = new TextView
         {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            ReadOnly = true,
-            WordWrap = false,
+            X = 0, Y = 0,
+            Width = Dim.Fill(), Height = Dim.Fill(),
+            ReadOnly = true, WordWrap = false,
         };
         _detailPane.Add(_detail);
 
         Add(sessionPane, timelinePane, _detailPane);
 
         _sessionList.SelectedItemChanged += args => LoadSession(args.Item);
-        _timeline.SelectedItemChanged += args => ShowDetail(args.Item);
+        _timeline.SelectionChanged += (_, args) => ShowDetailFor(args.NewValue);
 
         KeyPress += OnKeyPress;
         Closing += (_) => StopFollow();
@@ -184,7 +241,7 @@ sealed class InspectorView : Window
     {
         _detailMode = _detailMode == DetailMode.Raw ? DetailMode.Rendered : DetailMode.Raw;
         UpdateDetailPaneTitle();
-        ShowDetail(_timeline.SelectedItem);
+        ShowDetailFor(_timeline.SelectedObject);
     }
 
     private void ToggleWordWrap()
@@ -243,9 +300,8 @@ sealed class InspectorView : Window
                 _currentEvents.Add(ev);
             }
 
-            RefreshTimeline(preserveSelection: false);
-            if (_currentEvents.Count > 0) ShowDetail(0);
-            else _detail.Text = "(empty session)";
+            RebuildTimeline(preserveSelection: false);
+            if (_timelineNodes.Count == 0) _detail.Text = "(empty session)";
 
             if (_follow)
             {
@@ -261,9 +317,8 @@ sealed class InspectorView : Window
         catch (Exception ex)
         {
             _currentEvents = new List<Events.SessionEvent>();
-            var oneLine = ex.Message.Split('\n', 2)[0];
-            _timeline.SetSource(new List<string> { $"[parse error] {Truncate(oneLine, 80)}" });
-            _timeline.SelectedItem = 0;
+            _timelineNodes = new List<TimelineNode>();
+            _timeline.ClearObjects();
             _detail.Text =
                 $"Could not parse {Path.GetFileName(path)}\n\n" +
                 $"{ex.GetType().Name}: {ex.Message}\n\n" +
@@ -278,23 +333,88 @@ sealed class InspectorView : Window
         UpdateStatus();
     }
 
-    private void ShowDetail(int idx)
+    private void RebuildTimeline(bool preserveSelection)
     {
-        if (idx < 0 || idx >= _currentEvents.Count) return;
-        var ev = _currentEvents[idx];
-        _detail.Text = _detailMode == DetailMode.Raw ? RenderRaw(ev) : RenderEvent(ev);
+        var prevId = _timeline.SelectedObject?.BackingEvent?.Id;
+
+        _timelineNodes = BuildTimelineNodes(_currentEvents);
+        _timeline.ClearObjects();
+        _timeline.AddObjects(_timelineNodes);
+        _timeline.ExpandAll();
+
+        TimelineNode? target = null;
+        if (preserveSelection && prevId is not null)
+            target = FindNodeByEventId(prevId);
+        target ??= FirstDisplayableNode();
+
+        if (target is not null)
+        {
+            _timeline.SelectedObject = target;
+            ShowDetailFor(target);
+        }
     }
 
-    private void RefreshTimeline(bool preserveSelection)
+    private static List<TimelineNode> BuildTimelineNodes(List<Events.SessionEvent> events)
     {
-        var prevIdx = _timeline.SelectedItem;
-        var wasAtBottom = _currentEvents.Count > 0 && prevIdx >= _currentEvents.Count - 1;
-        var rows = _currentEvents.Select(Summary).ToList();
-        _timeline.SetSource(rows);
-        if (rows.Count == 0) return;
-        if (!preserveSelection) _timeline.SelectedItem = 0;
-        else if (wasAtBottom) _timeline.SelectedItem = rows.Count - 1;
-        else if (prevIdx >= 0 && prevIdx < rows.Count) _timeline.SelectedItem = prevIdx;
+        var result = new List<TimelineNode>();
+        var groups = new Dictionary<string, TurnGroup>();
+        foreach (var ev in events)
+        {
+            var line = EventLine(ev);
+            if (ev.TurnId is { } turnId)
+            {
+                if (!groups.TryGetValue(turnId, out var group))
+                {
+                    group = new TurnGroup(turnId);
+                    groups[turnId] = group;
+                    result.Add(group);
+                }
+                group.ChildNodes.Add(new EventNode(ev, line));
+            }
+            else
+            {
+                result.Add(new EventNode(ev, line));
+            }
+        }
+        return result;
+    }
+
+    private TimelineNode? FindNodeByEventId(string id)
+    {
+        foreach (var n in _timelineNodes)
+        {
+            if (n.BackingEvent?.Id == id) return n;
+            if (n is TurnGroup tg)
+                foreach (var child in tg.ChildNodes)
+                    if (child.BackingEvent?.Id == id) return child;
+        }
+        return null;
+    }
+
+    private TimelineNode? FirstDisplayableNode()
+    {
+        foreach (var n in _timelineNodes)
+        {
+            if (n is EventNode) return n;
+            if (n is TurnGroup tg && tg.ChildNodes.Count > 0) return tg.ChildNodes[0];
+        }
+        return _timelineNodes.FirstOrDefault();
+    }
+
+    private void ShowDetailFor(TimelineNode? node)
+    {
+        if (node is null) { _detail.Text = ""; return; }
+
+        if (node is TurnGroup tg)
+        {
+            _detail.Text = _detailMode == DetailMode.Raw
+                ? $"(turn grouping row — select a child event for raw JSON)\n\n{RenderTurnSummary(tg)}"
+                : RenderTurnSummary(tg);
+            return;
+        }
+
+        if (node.BackingEvent is { } ev)
+            _detail.Text = _detailMode == DetailMode.Raw ? RenderRaw(ev) : RenderEvent(ev);
     }
 
     private void PollFollow()
@@ -315,7 +435,7 @@ sealed class InspectorView : Window
                         added++;
                     }
                 }
-                catch { /* skip poison line; writer shouldn't produce one */ }
+                catch { /* skip poison line */ }
             }
         }
         catch
@@ -325,7 +445,7 @@ sealed class InspectorView : Window
         }
         if (added > 0)
         {
-            RefreshTimeline(preserveSelection: true);
+            RebuildTimeline(preserveSelection: true);
             UpdateStatus();
         }
     }
@@ -368,15 +488,51 @@ sealed class InspectorView : Window
         _statusBar.SetNeedsDisplay();
     }
 
-    // ---------- raw-mode rendering ----------
+    // ---------- timeline formatting ----------
+
+    private static string EventLine(Events.SessionEvent ev)
+    {
+        var type = TypeLabel(ev).PadRight(14);
+        var summary = EventSummary(ev);
+        return string.IsNullOrEmpty(summary)
+            ? $"{Time(ev.Ts)}  {type}"
+            : $"{Time(ev.Ts)}  {type}  {summary}";
+    }
+
+    private static string TypeLabel(Events.SessionEvent ev) => ev switch
+    {
+        Events.Meta         => "session_meta",
+        Events.UserInput    => "user_input",
+        Events.LlmRequest   => "llm_request",
+        Events.LlmResponse  => "llm_response",
+        Events.ToolCall     => "tool_call",
+        Events.ToolResult   => "tool_result",
+        Events.Error        => "error",
+        Events.End          => "session_end",
+        _                   => ev.GetType().Name.ToLowerInvariant(),
+    };
+
+    private static string EventSummary(Events.SessionEvent ev) => ev switch
+    {
+        Events.Meta m        => $"persona={m.Persona} model={m.Model}",
+        Events.UserInput u   => Truncate(u.Content, 60),
+        Events.LlmRequest    => "",
+        Events.LlmResponse r => $"{r.DurationMs}ms" +
+                                (r.Body.Usage is { } u ? $"  {u.TotalTokens} tok" : ""),
+        Events.ToolCall c    => c.Name,
+        Events.ToolResult t  => $"{t.DurationMs}ms" + (t.Error is null ? "" : " [error]"),
+        Events.Error e       => $"[{e.Phase}] {Truncate(e.Message, 50)}",
+        Events.End           => "",
+        _                    => "",
+    };
+
+    // ---------- raw & rendered event bodies ----------
 
     private static string RenderRaw(Events.SessionEvent ev)
     {
         var options = new JsonSerializerOptions(Json.Options) { WriteIndented = true };
         return JsonSerializer.Serialize<Events.SessionEvent>(ev, options);
     }
-
-    // ---------- rendered-mode ("human-friendly") rendering ----------
 
     private static string RenderEvent(Events.SessionEvent ev) => ev switch
     {
@@ -516,6 +672,31 @@ sealed class InspectorView : Window
         return sb.ToString();
     }
 
+    private static string RenderTurnSummary(TurnGroup tg)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"TURN {tg.TurnId}");
+        sb.AppendLine($"  events: {tg.ChildNodes.Count}");
+        if (tg.ChildNodes.Count > 0)
+        {
+            var first = tg.ChildNodes[0].Event.Ts;
+            var last = tg.ChildNodes[^1].Event.Ts;
+            var dur = (long)(last - first).TotalMilliseconds;
+            sb.AppendLine($"  duration: {dur}ms  ({Time(first)} → {Time(last)})");
+        }
+        var tokens = tg.ChildNodes
+            .Select(n => n.Event)
+            .OfType<Events.LlmResponse>()
+            .Select(r => r.Body.Usage?.TotalTokens ?? 0)
+            .Sum();
+        if (tokens > 0) sb.AppendLine($"  tokens: {tokens}");
+        sb.AppendLine();
+        sb.AppendLine("  contains:");
+        foreach (var child in tg.ChildNodes)
+            sb.AppendLine($"    {child.Display}");
+        return sb.ToString();
+    }
+
     // ---------- helpers ----------
 
     private static string Indent(string text, string prefix) =>
@@ -541,19 +722,6 @@ sealed class InspectorView : Window
 
     private static string FormatK(int n) =>
         n >= 1000 ? $"{n / 1000.0:0.#}k" : n.ToString();
-
-    private static string Summary(Events.SessionEvent ev) => ev switch
-    {
-        Events.Meta m        => $"{Time(ev.Ts)}  session_meta    persona={m.Persona} model={m.Model}",
-        Events.UserInput u   => $"{Time(ev.Ts)}  user_input      {Truncate(u.Content, 50)}",
-        Events.LlmRequest    => $"{Time(ev.Ts)}  llm_request",
-        Events.LlmResponse r => $"{Time(ev.Ts)}  llm_response    {r.DurationMs}ms",
-        Events.ToolCall c    => $"{Time(ev.Ts)}  tool_call       {c.Name}",
-        Events.ToolResult t  => $"{Time(ev.Ts)}  tool_result     {t.DurationMs}ms{(t.Error is null ? "" : " [error]")}",
-        Events.Error e       => $"{Time(ev.Ts)}  error           [{e.Phase}] {Truncate(e.Message, 40)}",
-        Events.End           => $"{Time(ev.Ts)}  session_end",
-        _                    => $"{Time(ev.Ts)}  {ev.GetType().Name}",
-    };
 
     private static string Time(DateTimeOffset ts) => ts.LocalDateTime.ToString("HH:mm:ss");
 
