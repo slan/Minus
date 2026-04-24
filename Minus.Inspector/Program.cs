@@ -282,6 +282,8 @@ sealed class InspectorView : View
             TreeBuilder = new DelegateTreeBuilder<TimelineNode>(n => n.Children),
             ColorScheme = theme.Focus,
         };
+        _timeline.Style.ExpandableSymbol = new System.Rune('▶');
+        _timeline.Style.CollapseableSymbol = new System.Rune('▼');
 
         var hSep = new LineView(Orientation.Horizontal)
         {
