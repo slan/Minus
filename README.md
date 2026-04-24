@@ -1,69 +1,56 @@
 # Minus
 
-A minimal C# CLI agent that talks to a [llama.cpp](https://github.com/ggerganov/llama.cpp) server (or any OpenAI-compatible `/v1/chat/completions` endpoint) with tool-calling support.
+A minimal C# agent and session inspector for poking at local LLMs over an OpenAI-compatible `/v1/chat/completions` endpoint. Built against [llama.cpp](https://github.com/ggerganov/llama.cpp) but works with anything that speaks the same wire format.
 
-Minus keeps the loop small and readable: one chat history, one tool registry, one persona prompt, and a JSONL transcript of everything that happens.
+- **`minus`** — a REPL agent with tool-calling support that writes a full typed JSONL transcript of every session.
+- **`minus-view`** — a Terminal.Gui TUI for browsing and live-tailing those transcripts. Turn-grouped timeline, syntax-highlighted JSON detail, follow mode.
+
+The goal is deep debuggability: nothing the model sends, receives, or reasons about is hidden.
 
 ## Requirements
 
 - .NET 10 SDK
-- A running llama.cpp server (or any OpenAI-compatible endpoint) that supports function/tool calling
+- A running OpenAI-compatible chat-completions endpoint (e.g. [llama.cpp's `llama-server`](https://github.com/ggerganov/llama.cpp/tree/master/examples/server)) that supports tool calling
 
-## Build and run
+## Quick start
 
-```sh
-dotnet run
+```powershell
+# Terminal 1 — start the agent against a local llama.cpp server
+dotnet run --project Minus.Agent
+
+# Terminal 2 — live-tail the newest session
+dotnet run --project Minus.Inspector -- --follow
 ```
 
-By default Minus connects to `http://127.0.0.1:8080` and uses the `default` persona. (The literal `127.0.0.1` matters on Windows — resolving `localhost` can add a ~21s stall per request while the IPv6 attempt times out before falling back to IPv4.)
-
-Override via flags or environment variables:
-
-```sh
-dotnet run -- --endpoint http://127.0.0.1:8080 --model local --persona default
-```
-
-| Flag         | Env var           | Default                  |
-| ------------ | ----------------- | ------------------------ |
-| `--endpoint` | `MINUS_ENDPOINT`  | `http://127.0.0.1:8080`  |
-| `--model`    | `MINUS_MODEL`     | `local`                  |
-| `--persona`  | —                 | `default`                |
-
-Type messages at the `>` prompt. `exit` or Ctrl+D quits.
-
-## Personas
-
-A persona is a Markdown file in `personas/` whose contents become the system prompt. To add one, drop `personas/my-persona.md` into the directory and pass `--persona my-persona`. Persona files are copied to the build output automatically.
-
-## Tools
-
-The agent is wired with two tools out of the box:
-
-- `read_file` — read a file's contents as a string
-- `list_directory` — list files and subdirectories (directories get a trailing `/`)
-
-Adding a tool means implementing `ITool` (see `Tool.cs`) and registering it in `Program.cs`:
-
-```csharp
-ITool[] tools = [new ReadFileTool(), new ListDirectoryTool(), new MyTool()];
-```
-
-Each tool declares a name, a description, and a JSON Schema for its parameters. These are forwarded to the model as function definitions.
-
-## Transcripts
-
-Every session writes a JSONL transcript to `sessions/<timestamp>.jsonl` containing session metadata, user input, LLM requests and responses, tool calls, tool results, and errors. Useful for debugging model behavior or replaying a conversation.
+Type messages at the agent's `>` prompt. Watch the inspector fill in as the agent calls tools and the model responds. Press `q` in the inspector to quit, `r` to toggle raw-JSON vs rendered detail, `w` to toggle word-wrap.
 
 ## Project layout
 
 ```
-Program.cs        — CLI entry point, arg parsing, REPL loop
-Agent.cs          — chat loop, tool dispatch, max-iteration guard
-LlamaClient.cs    — HTTP client for /v1/chat/completions
-Protocol.cs       — OpenAI-compatible chat completion records
-Tool.cs           — ITool interface
-Tools/            — built-in tool implementations
-Transcript.cs     — JSONL session logger
-Json.cs           — shared JsonSerializerOptions
-personas/         — system prompts, one per file
+Minus.sln(x)
+├── Minus.Core/       — shared event types, transcript I/O, OpenAI chat records
+├── Minus.Agent/      — the REPL agent (outputs: minus)
+├── Minus.Inspector/  — the TUI viewer (outputs: minus-view)
+└── docs/             — detailed documentation (see index below)
 ```
+
+`Minus.Core` has no UI and no CLI — it's the contract between the two binaries. See [docs/architecture.md](docs/architecture.md) for why the split exists and what each layer owns.
+
+## Documentation
+
+| Doc | What's in it |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Three-project split, event flow, key design decisions |
+| [docs/agent.md](docs/agent.md) | Running, configuring, and extending `minus` — personas, tools, CLI flags, the turn loop |
+| [docs/inspector.md](docs/inspector.md) | Using `minus-view` — layout, keybindings, detail modes, follow mode |
+| [docs/transcript-schema.md](docs/transcript-schema.md) | The JSONL session format, every event type, linkage fields, examples |
+
+## Notes worth knowing up front
+
+- **Use `127.0.0.1`, not `localhost`.** Docker Desktop on Windows only binds the forwarded port on IPv4; resolving `localhost` hits `::1` first and TCP SYN stalls for ~21 seconds before falling back. We default to `127.0.0.1` for this reason. See [docs/agent.md](docs/agent.md).
+- **Reasoning models are supported but off-by-default.** If the server is configured with `--reasoning-format deepseek`, Minus captures the `reasoning_content` field in its transcripts and strips it from history before the next turn (so prior reasoning doesn't get replayed).
+- **The transcript schema changed during development.** Old JSONL files written before the typed-event refactor won't parse. The inspector surfaces this as a clear error — delete the file or start fresh.
+
+## License
+
+MIT.
