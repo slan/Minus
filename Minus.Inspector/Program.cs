@@ -4,9 +4,8 @@ using Terminal.Gui;
 using Events = Minus.Core.Events;
 
 // minus-view — read-only TUI for inspecting Minus session transcripts.
-// Three panes: session list (left), event timeline (top-right), event
-// detail as pretty JSON (bottom-right). Pass --follow to live-tail the
-// selected session as the agent appends events.
+// Three panes (session list / timeline / event detail) plus a status bar.
+// Pass --follow to live-tail the selected session as the agent appends.
 
 bool follow = false;
 string? sessionsDir = null;
@@ -34,7 +33,26 @@ if (!Directory.Exists(sessionsDir))
 Application.Init();
 try
 {
-    Application.Run(new InspectorView(sessionsDir, follow));
+    var top = Application.Top;
+
+    // Dynamic "info" status item; mutable Title is updated by InspectorView.
+    var statusInfo = new StatusItem(Key.Null, "(no session)", null);
+    var statusBar = new StatusBar(new[]
+    {
+        statusInfo,
+        new StatusItem(Key.q | Key.CtrlMask, "~^Q Quit", () => Application.RequestStop()),
+    });
+
+    var inspector = new InspectorView(sessionsDir, follow, statusInfo, statusBar)
+    {
+        Y = 0,
+        Width = Dim.Fill(),
+        Height = Dim.Fill(1), // leave 1 row for the StatusBar
+    };
+
+    top.Add(inspector);
+    top.Add(statusBar);
+    Application.Run();
 }
 finally
 {
@@ -49,6 +67,8 @@ sealed class InspectorView : Window
     private readonly TextView _detail;
     private readonly string _sessionsDir;
     private readonly bool _follow;
+    private readonly StatusItem _statusInfo;
+    private readonly StatusBar _statusBar;
 
     private List<string> _sessionFiles = new();
     private List<Events.SessionEvent> _currentEvents = new();
@@ -59,12 +79,18 @@ sealed class InspectorView : Window
     private StreamReader? _followReader;
     private object? _followTimerToken;
 
-    public InspectorView(string sessionsDir, bool follow)
+    public InspectorView(
+        string sessionsDir,
+        bool follow,
+        StatusItem statusInfo,
+        StatusBar statusBar)
     {
         _sessionsDir = sessionsDir;
         _follow = follow;
+        _statusInfo = statusInfo;
+        _statusBar = statusBar;
         var suffix = follow ? "  [follow]" : "";
-        Title = $"minus-view — {sessionsDir}{suffix}  (q to quit, Tab to switch panes)";
+        Title = $"minus-view — {sessionsDir}{suffix}  (Tab switches panes)";
 
         var sessionPane = new FrameView("Sessions")
         {
@@ -153,6 +179,10 @@ sealed class InspectorView : Window
             _sessionList.SelectedItem = 0;
             LoadSession(0);
         }
+        else
+        {
+            UpdateStatus();
+        }
     }
 
     private void LoadSession(int idx)
@@ -164,10 +194,6 @@ sealed class InspectorView : Window
         StreamReader? reader = null;
         try
         {
-            // Inline the read instead of using TranscriptReader.Read so we can
-            // hand off the same stream to follow mode — otherwise there's a
-            // narrow race where the agent appends between close-and-reopen
-            // and we miss those events.
             stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             reader = new StreamReader(stream);
             _currentEvents = new List<Events.SessionEvent>();
@@ -208,10 +234,10 @@ sealed class InspectorView : Window
         }
         finally
         {
-            // If we handed the stream off to follow mode these are null; else close.
             reader?.Dispose();
             stream?.Dispose();
         }
+        UpdateStatus();
     }
 
     private void ShowDetail(int idx)
@@ -251,10 +277,7 @@ sealed class InspectorView : Window
                         added++;
                     }
                 }
-                catch
-                {
-                    // Skip unparseable line silently; the writer shouldn't produce them.
-                }
+                catch { /* skip poison line, writer shouldn't produce one */ }
             }
         }
         catch
@@ -262,7 +285,11 @@ sealed class InspectorView : Window
             StopFollow();
             return;
         }
-        if (added > 0) RefreshTimeline(preserveSelection: true);
+        if (added > 0)
+        {
+            RefreshTimeline(preserveSelection: true);
+            UpdateStatus();
+        }
     }
 
     private void StopFollow()
@@ -277,6 +304,42 @@ sealed class InspectorView : Window
         _followReader = null;
         _followStream = null;
     }
+
+    private void UpdateStatus()
+    {
+        var sessionName = _sessionFiles.Count > 0
+            && _sessionList.SelectedItem >= 0
+            && _sessionList.SelectedItem < _sessionFiles.Count
+                ? Path.GetFileNameWithoutExtension(_sessionFiles[_sessionList.SelectedItem])
+                : "(no session)";
+
+        var count = _currentEvents.Count;
+
+        // Token stats from the most recent llm_response with usage.
+        var lastUsage = _currentEvents
+            .OfType<Events.LlmResponse>()
+            .Select(r => r.Body.Usage)
+            .LastOrDefault(u => u is not null);
+
+        string tokens;
+        if (lastUsage is null)
+        {
+            tokens = "";
+        }
+        else
+        {
+            tokens = $" | ctx {Format(lastUsage.PromptTokens)} tok " +
+                     $"(+{Format(lastUsage.CompletionTokens)} gen)";
+        }
+
+        var followTag = _follow ? " | [following]" : "";
+
+        _statusInfo.Title = $"{sessionName}  |  {count} events{tokens}{followTag}";
+        _statusBar.SetNeedsDisplay();
+    }
+
+    private static string Format(int n) =>
+        n >= 1000 ? $"{n / 1000.0:0.#}k" : n.ToString();
 
     private static string Summary(Events.SessionEvent ev) => ev switch
     {
