@@ -134,11 +134,10 @@ sealed class InspectorView : Window
     private void LoadSession(int idx)
     {
         if (idx < 0 || idx >= _sessionFiles.Count) return;
+        var path = _sessionFiles[idx];
         try
         {
-            _currentEvents = TranscriptReader.ReadAsync(_sessionFiles[idx])
-                .ToBlockingEnumerable()
-                .ToList();
+            _currentEvents = TranscriptReader.Read(path).ToList();
             var rows = _currentEvents.Select(Summary).ToList();
             _timeline.SetSource(rows);
             if (_currentEvents.Count > 0)
@@ -154,8 +153,14 @@ sealed class InspectorView : Window
         catch (Exception ex)
         {
             _currentEvents = new List<Events.SessionEvent>();
-            _timeline.SetSource(new List<string> { "[parse error]" });
-            _detail.Text = $"parse error reading {_sessionFiles[idx]}:\n\n{ex}";
+            var oneLine = ex.Message.Split('\n', 2)[0];
+            _timeline.SetSource(new List<string> { $"[parse error] {Truncate(oneLine, 80)}" });
+            _timeline.SelectedItem = 0;
+            _detail.Text =
+                $"Could not parse {Path.GetFileName(path)}\n\n" +
+                $"{ex.GetType().Name}: {ex.Message}\n\n" +
+                $"This is expected for transcripts written before the typed-event\n" +
+                $"schema change. Delete the file or start a new session.";
         }
     }
 
