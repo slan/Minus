@@ -28,6 +28,10 @@ dotnet build Minus.Inspector
 # Common agent flags / env vars
 dotnet run --project Minus.Agent -- --endpoint http://127.0.0.1:9090 --model gemma-4-e4b --persona debugger
 # MINUS_ENDPOINT, MINUS_MODEL also work
+
+# Load tool plugins (toolboxes); flag is repeatable.
+# Resolution order: as-given → <BaseDirectory>/toolboxes/<name> → same with .dll appended
+dotnet run --project Minus.Agent -- --toolbox Minus.Toolbox.DateTime/bin/Debug/net10.0/Minus.Toolbox.DateTime.dll
 ```
 
 There are no tests in this repo yet.
@@ -36,9 +40,10 @@ There are no tests in this repo yet.
 
 Three projects, one solution. The split is load-bearing — don't collapse them.
 
-- **`Minus.Core`** — shared contract. Zero UI, zero CLI, zero HTTP. Contains the `SessionEvent` polymorphic hierarchy (`Events.cs`), OpenAI wire records (`Protocol.cs`), `TranscriptWriter` / `TranscriptReader`, `ISessionEventSink`, and shared `JsonSerializerOptions` (snake_case, null-omitting). Both binaries depend on this.
-- **`Minus.Agent`** → builds to `minus`. The REPL, turn loop (`Agent.cs`), HTTP client (`LlamaClient.cs`), tool dispatch (`Tool.cs` + `Tools/`), slash commands (`SlashCommand.cs` + `Commands/`), Spectre.Console UI (`ConsoleUi.cs`, `AsyncConsole.cs`), and personas (markdown copied to output as content files).
+- **`Minus.Core`** — shared contract. Zero UI, zero CLI, zero HTTP. Contains the `SessionEvent` polymorphic hierarchy (`Events.cs`), OpenAI wire records (`Protocol.cs`), `TranscriptWriter` / `TranscriptReader`, `ISessionEventSink`, the `ITool` plugin contract (`Tool.cs`), and shared `JsonSerializerOptions` (snake_case, null-omitting). All binaries and toolbox plugins depend on this.
+- **`Minus.Agent`** → builds to `minus`. The REPL, turn loop (`Agent.cs`), HTTP client (`LlamaClient.cs`), toolbox loader (`ToolboxLoader.cs`), slash commands (`SlashCommand.cs` + `Commands/`), Spectre.Console UI (`ConsoleUi.cs`, `AsyncConsole.cs`), and personas (markdown copied to output as content files). Ships with no built-in tools — load them via `--toolbox <path>`.
 - **`Minus.Inspector`** → builds to `minus-view`. Terminal.Gui v1 TUI; everything lives in `Program.cs`. Depends only on `Minus.Core`.
+- **`Minus.Toolbox.*`** → standalone DLLs implementing `ITool`. Reference `Minus.Core` with `<Private>false</Private>` + `<ExcludeAssets>runtime</ExcludeAssets>` so they don't ship a duplicate `Minus.Core.dll`. Loaded at runtime via `--toolbox`.
 
 ### Event flow & linkage
 
@@ -56,7 +61,7 @@ The agent doesn't write to disk directly. Events flow through `ISessionEventSink
 
 ### Slash commands vs. tools — keep them straight
 
-- **`ITool`** (in `Minus.Agent/Tool.cs`) — invoked by the *model*; output is fed back into the conversation as a `tool` role message. Register in `Program.cs` (`ITool[] tools = [...]`). Each needs `Name`, `Description`, a strict `ParametersSchema` (`JsonElement` JSON Schema), and `ExecuteAsync`.
+- **`ITool`** (in `Minus.Core/Tool.cs`) — invoked by the *model*; output is fed back into the conversation as a `tool` role message. Each needs `Name`, `Description`, a strict `ParametersSchema` (`JsonElement` JSON Schema), and `ExecuteAsync`. Tools are *not* registered in `Program.cs` — they live in standalone toolbox DLLs and are loaded via `--toolbox <path>` at startup. The agent ships zero tools by default.
 - **`ISlashCommand`** (in `Minus.Agent/SlashCommand.cs`) — invoked by the *user* with `/name`; effect is purely local (print, change settings, exit). Register in `Program.cs` (`ISlashCommand[] slashCommands = [...]`).
 
 ### Personas
@@ -77,7 +82,7 @@ Markdown files in `Minus.Agent/personas/`. The `.csproj` copies `personas/*.md` 
 
 ## Adding things
 
-- **A new tool** — implement `ITool` in `Minus.Agent/Tools/`, register in `Program.cs`. Keep `ParametersSchema` strict (required fields, enums, no free-form objects); the model behaves better with tight schemas.
+- **A new tool** — create (or extend) a `Minus.Toolbox.<name>` project that references `Minus.Core` (with `<Private>false</Private>` + `<ExcludeAssets>runtime</ExcludeAssets>`), implement `ITool`, build it, and load with `--toolbox`. Any public class implementing `ITool` with a parameterless constructor is auto-registered. Keep `ParametersSchema` strict (required fields, enums, no free-form objects); the model behaves better with tight schemas.
 - **A new slash command** — implement `ISlashCommand` in `Minus.Agent/Commands/`, register in `Program.cs`.
 - **A new event type** — add a record to `Minus.Core/Events.cs` with `[JsonDerivedType]`. The compiler will demand the inspector handle it (both raw and rendered detail modes in `Minus.Inspector/Program.cs`). That symmetry is the whole reason `Minus.Core` exists — don't subvert it by stuffing untyped data into an existing event.
 

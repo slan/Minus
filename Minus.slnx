@@ -2,4 +2,5 @@
   <Project Path="Minus.Agent/Minus.Agent.csproj" />
   <Project Path="Minus.Core/Minus.Core.csproj" />
   <Project Path="Minus.Inspector/Minus.Inspector.csproj" />
+  <Project Path="Minus.Toolbox.DateTime/Minus.Toolbox.DateTime.csproj" />
 </Solution>

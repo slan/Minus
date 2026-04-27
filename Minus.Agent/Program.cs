@@ -3,7 +3,6 @@ using System.Threading.Channels;
 using Minus;
 using Minus.Commands;
 using Minus.Core;
-using Minus.Tools;
 using Spectre.Console;
 using Events = Minus.Core.Events;
 
@@ -12,6 +11,7 @@ using Events = Minus.Core.Events;
 var endpoint = Environment.GetEnvironmentVariable("MINUS_ENDPOINT") ?? "http://127.0.0.1:8080";
 var model = Environment.GetEnvironmentVariable("MINUS_MODEL") ?? "local";
 var personaName = "default";
+var toolboxPaths = new List<string>();
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -20,6 +20,7 @@ for (int i = 0; i < args.Length; i++)
         case "--persona": personaName = args[++i]; break;
         case "--endpoint": endpoint = args[++i]; break;
         case "--model": model = args[++i]; break;
+        case "--toolbox": toolboxPaths.Add(args[++i]); break;
     }
 }
 
@@ -43,7 +44,22 @@ var sink = new AggregateEventSink(transcript, ui);
 var cwd = Directory.GetCurrentDirectory();
 var minusVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString();
 
-ITool[] tools = [new ReadFileTool(), new ListDirectoryTool()];
+var tools = new List<ITool>();
+foreach (var tb in toolboxPaths)
+{
+    try
+    {
+        var loaded = ToolboxLoader.Load(tb);
+        tools.AddRange(loaded);
+        AnsiConsole.MarkupLine($"[grey]toolbox:[/] [dim]{Markup.Escape(tb)}[/] → {string.Join(", ", loaded.Select(t => t.Name))}");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"failed to load toolbox '{tb}': {ex.Message}");
+        return 1;
+    }
+}
+
 var client = new LlamaClient(endpoint, model, sink);
 var agent = new Agent(systemPrompt, client, sink, tools);
 

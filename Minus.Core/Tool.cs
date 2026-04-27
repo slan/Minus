@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Minus;
+namespace Minus.Core;
 
 public interface ITool
 {
